@@ -3,39 +3,35 @@ import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 import "./styles.css";
 
-class AppErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { error: null };
-  }
+function showStartupError(error) {
+  const root = document.getElementById("root");
+  if (!root) return;
 
-  static getDerivedStateFromError(error) {
-    return { error };
-  }
-
-  render() {
-    if (this.state.error) {
-      return (
-        <main className="page">
-          <section className="shell">
-            <article className="card card--danger">
-              <span className="eyebrow">Error de arranque</span>
-              <h1>RC Wallet no pudo abrir correctamente</h1>
-              <p className="warning">
-                Actualiza la página. Si sigue pasando, borra el cache de la PWA o abre una ventana privada.
-              </p>
-              <code className="address">
-                {this.state.error instanceof Error ? this.state.error.message : "Error desconocido"}
-              </code>
-            </article>
-          </section>
-        </main>
-      );
-    }
-
-    return this.props.children;
-  }
+  const message = error instanceof Error ? error.message : String(error ?? "Error desconocido");
+  root.innerHTML = `
+    <main class="page">
+      <section class="shell">
+        <article class="card card--danger">
+          <span class="eyebrow">Error de arranque</span>
+          <h1>RC Wallet no pudo abrir correctamente</h1>
+          <p class="warning">
+            Actualiza la página. Si sigue pasando, borra el cache de la PWA o abre una ventana privada.
+          </p>
+          <code class="address"></code>
+        </article>
+      </section>
+    </main>
+  `;
+  root.querySelector("code")?.append(document.createTextNode(message));
 }
+
+window.addEventListener("error", (event) => {
+  showStartupError(event.error ?? event.message);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  showStartupError(event.reason);
+});
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
@@ -45,8 +41,8 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(
-  <AppErrorBoundary>
-    <App />
-  </AppErrorBoundary>,
-);
+try {
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+} catch (error) {
+  showStartupError(error);
+}
