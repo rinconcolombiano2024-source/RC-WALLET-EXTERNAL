@@ -1,4 +1,4 @@
-const CACHE_NAME = "rc-wallet-external-v2";
+const CACHE_NAME = "rc-wallet-external-v3";
 const APP_SHELL = ["/manifest.webmanifest", "/rc-wallet-external-icon.svg"];
 
 self.addEventListener("install", (event) => {
