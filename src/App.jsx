@@ -88,8 +88,6 @@ export default function App() {
   const [expectedAddressInput, setExpectedAddressInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [showPrivateKey, setShowPrivateKey] = useState(false);
-  const [miniKit, setMiniKit] = useState(null);
-  const [miniKitReady, setMiniKitReady] = useState(false);
   const [authenticatingWorld, setAuthenticatingWorld] = useState(false);
   const [authenticatedWorldAddress, setAuthenticatedWorldAddress] = useState("");
   const [worldAccount, setWorldAccount] = useState(null);
@@ -158,46 +156,16 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    let active = true;
-
-    async function loadMiniKitSafely() {
-      try {
-        const module = await import("@worldcoin/minikit-js");
-        const sdk = module.MiniKit;
-        const installed = sdk?.install?.();
-        if (!active) return;
-
-        setMiniKit(sdk ?? null);
-        setMiniKitReady(Boolean(installed?.success));
-
-        const walletAddress = tryNormalizeAddress(sdk?.user?.walletAddress);
-        if (walletAddress) {
-          setAuthenticatedWorldAddress(walletAddress);
-          setExpectedAddressInput((current) => current || walletAddress);
-          void inspectExpectedWorldAccount(walletAddress);
-        }
-      } catch {
-        if (!active) return;
-        setMiniKit(null);
-        setMiniKitReady(false);
-      }
-    }
-
-    void loadMiniKitSafely();
-    return () => {
-      active = false;
-    };
-  }, [inspectExpectedWorldAccount]);
-
   const loginWithWorldId = useCallback(async () => {
-    if (!miniKitReady || !miniKit?.walletAuth) {
-      showStatus("World ID solo puede autenticarse cuando la app se abre dentro de World App.", "warning");
-      return;
-    }
-
     setAuthenticatingWorld(true);
     try {
+      const module = await import("@worldcoin/minikit-js");
+      const miniKit = module.MiniKit;
+      const installed = miniKit?.install?.();
+      if (!installed?.success || !miniKit?.walletAuth) {
+        throw new Error("World ID solo puede autenticarse cuando la app se abre dentro de World App.");
+      }
+
       const nonceResponse = await fetch("/api/nonce", {
         credentials: "include",
         cache: "no-store",
@@ -243,7 +211,7 @@ export default function App() {
     } finally {
       setAuthenticatingWorld(false);
     }
-  }, [inspectExpectedWorldAccount, miniKit, miniKitReady, showStatus]);
+  }, [inspectExpectedWorldAccount, showStatus]);
 
   const scan = useCallback(async () => {
     if (!session?.address) return;
@@ -490,13 +458,11 @@ export default function App() {
                 className="button button--primary"
                 type="button"
                 onClick={loginWithWorldId}
-                disabled={!miniKitReady || authenticatingWorld}
+                disabled={authenticatingWorld}
               >
                 {authenticatingWorld
                   ? "Verificando World ID..."
-                  : miniKitReady
-                    ? "Iniciar sesión con World ID"
-                    : "World ID disponible dentro de World App"}
+                  : "Iniciar sesión con World ID"}
               </button>
               {authenticatedWorldAddress ? (
                 <div className="diagnostic-box">
