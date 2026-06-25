@@ -1,1 +1,19 @@
-
+{
+  "name": "RC Wallet Externa",
+  "short_name": "RC Externa",
+  "description": "Wallet EVM local, no custodial, para leer y mover fondos firmando en el dispositivo.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#070a0e",
+  "theme_color": "#070a0e",
+  "icons": [
+    {
+      "src": "/rc-wallet-external-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
