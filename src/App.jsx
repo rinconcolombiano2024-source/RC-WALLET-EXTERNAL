@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ethers } from "ethers";
-import { MiniKit } from "@worldcoin/minikit-js";
 import { EXTERNAL_PROVIDERS, NETWORKS } from "./config.js";
 import {
   compactAddress,
@@ -89,6 +88,7 @@ export default function App() {
   const [expectedAddressInput, setExpectedAddressInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [showPrivateKey, setShowPrivateKey] = useState(false);
+  const [miniKit, setMiniKit] = useState(null);
   const [miniKitReady, setMiniKitReady] = useState(false);
   const [authenticatingWorld, setAuthenticatingWorld] = useState(false);
   const [authenticatedWorldAddress, setAuthenticatedWorldAddress] = useState("");
@@ -159,22 +159,39 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    try {
-      const installed = MiniKit.install();
-      setMiniKitReady(Boolean(installed?.success));
-      const walletAddress = tryNormalizeAddress(MiniKit.user?.walletAddress);
-      if (walletAddress) {
-        setAuthenticatedWorldAddress(walletAddress);
-        setExpectedAddressInput((current) => current || walletAddress);
-        void inspectExpectedWorldAccount(walletAddress);
+    let active = true;
+
+    async function loadMiniKitSafely() {
+      try {
+        const module = await import("@worldcoin/minikit-js");
+        const sdk = module.MiniKit;
+        const installed = sdk?.install?.();
+        if (!active) return;
+
+        setMiniKit(sdk ?? null);
+        setMiniKitReady(Boolean(installed?.success));
+
+        const walletAddress = tryNormalizeAddress(sdk?.user?.walletAddress);
+        if (walletAddress) {
+          setAuthenticatedWorldAddress(walletAddress);
+          setExpectedAddressInput((current) => current || walletAddress);
+          void inspectExpectedWorldAccount(walletAddress);
+        }
+      } catch {
+        if (!active) return;
+        setMiniKit(null);
+        setMiniKitReady(false);
       }
-    } catch {
-      setMiniKitReady(false);
     }
+
+    void loadMiniKitSafely();
+    return () => {
+      active = false;
+    };
   }, [inspectExpectedWorldAccount]);
 
   const loginWithWorldId = useCallback(async () => {
-    if (!miniKitReady) {
+    if (!miniKitReady || !miniKit?.walletAuth) {
       showStatus("World ID solo puede autenticarse cuando la app se abre dentro de World App.", "warning");
       return;
     }
@@ -188,7 +205,7 @@ export default function App() {
       if (!nonceResponse.ok) throw new Error("No se pudo crear nonce de autenticación.");
       const { nonce } = await nonceResponse.json();
 
-      const authResult = await MiniKit.walletAuth({
+      const authResult = await miniKit.walletAuth({
         nonce,
         statement: WORLD_ID_STATEMENT,
         expirationTime: new Date(Date.now() + 7 * 60 * 1000),
@@ -211,7 +228,7 @@ export default function App() {
       }
 
       const walletAddress = tryNormalizeAddress(
-        complete.address || payload?.address || MiniKit.user?.walletAddress,
+        complete.address || payload?.address || miniKit.user?.walletAddress,
       );
       if (!walletAddress) {
         throw new Error("World ID no devolvió una dirección EVM válida.");
@@ -226,7 +243,7 @@ export default function App() {
     } finally {
       setAuthenticatingWorld(false);
     }
-  }, [inspectExpectedWorldAccount, miniKitReady, showStatus]);
+  }, [inspectExpectedWorldAccount, miniKit, miniKitReady, showStatus]);
 
   const scan = useCallback(async () => {
     if (!session?.address) return;
