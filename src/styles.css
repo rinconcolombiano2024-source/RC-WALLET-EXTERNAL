@@ -277,6 +277,55 @@ select.input {
   font-size: 12px;
 }
 
+.diagnostic-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 18px;
+  padding: 12px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.diagnostic-box--blocked {
+  border-color: rgba(245, 158, 11, 0.36);
+  background: rgba(69, 26, 3, 0.34);
+}
+
+.diagnostic-box span,
+.diagnostic-box small {
+  color: #93a4bb;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.diagnostic-box code {
+  display: block;
+  overflow-wrap: anywhere;
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #dbeafe;
+  font-size: 12px;
+}
+
+.diagnostic-box p {
+  margin: 0;
+}
+
+.diagnostic-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.details summary {
+  cursor: pointer;
+  color: #93c5fd;
+  font-weight: 800;
+}
+
 .stats,
 .network-grid {
   display: grid;

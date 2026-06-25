@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ethers } from "ethers";
+import { MiniKit } from "@worldcoin/minikit-js";
 import { EXTERNAL_PROVIDERS, NETWORKS } from "./config.js";
 import {
   compactAddress,
+  createImportDiagnosis,
   decryptVault,
   deleteStoredVault,
   deriveWallet,
@@ -11,12 +13,14 @@ import {
   explorerAddressUrl,
   explorerTxUrl,
   formatBalance,
+  inspectWorldAppAccount,
   normalizeAddress,
   readCustomTokens,
   readStoredVault,
   scanAllNetworks,
   sendAsset,
   tokenExplorerUrl,
+  tryNormalizeAddress,
   writeCustomTokens,
   writeStoredVault,
 } from "./wallet-core.js";
@@ -28,6 +32,8 @@ const TABS = Object.freeze([
   { id: "swap", label: "Swap", icon: "⇄" },
   { id: "tools", label: "Ajustes", icon: "⚙" },
 ]);
+
+const WORLD_ID_STATEMENT = "Iniciar sesión en RC Wallet Externa";
 
 function Status({ status }) {
   if (!status.message) return null;
@@ -83,6 +89,10 @@ export default function App() {
   const [expectedAddressInput, setExpectedAddressInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [showPrivateKey, setShowPrivateKey] = useState(false);
+  const [miniKitReady, setMiniKitReady] = useState(false);
+  const [authenticatingWorld, setAuthenticatingWorld] = useState(false);
+  const [authenticatedWorldAddress, setAuthenticatedWorldAddress] = useState("");
+  const [worldAccount, setWorldAccount] = useState(null);
   const [assets, setAssets] = useState([]);
   const [networkStates, setNetworkStates] = useState({});
   const [selectedAssetId, setSelectedAssetId] = useState("");
@@ -106,11 +116,18 @@ export default function App() {
     [assets, selectedAssetId],
   );
 
-  const verifiedMatch = Boolean(
-    session?.address &&
-      session?.expectedAddress &&
-      session.address.toLowerCase() === session.expectedAddress.toLowerCase(),
+  const importDiagnosis = useMemo(
+    () =>
+      createImportDiagnosis({
+        derivedAddress: session?.address,
+        expectedAddress: session?.expectedAddress || authenticatedWorldAddress,
+        worldAccount,
+      }),
+    [authenticatedWorldAddress, session?.address, session?.expectedAddress, worldAccount],
   );
+
+  const verifiedMatch = importDiagnosis.status === "match";
+  const operationsBlocked = Boolean(session?.address && importDiagnosis.blocksOperation);
 
   const totalAssets = assets.length;
   const nativeAssets = assets.filter((asset) => asset.isNative);
@@ -119,6 +136,97 @@ export default function App() {
   const showStatus = useCallback((message, type = "info") => {
     setStatus({ message, type });
   }, []);
+
+  const inspectExpectedWorldAccount = useCallback(async (address) => {
+    const normalizedAddress = tryNormalizeAddress(address);
+    if (!normalizedAddress) {
+      setWorldAccount(null);
+      return null;
+    }
+
+    try {
+      const inspection = await inspectWorldAppAccount(normalizedAddress);
+      setWorldAccount(inspection);
+      return inspection;
+    } catch (error) {
+      const fallback = {
+        address: normalizedAddress,
+        error: error instanceof Error ? error.message : "No se pudo inspeccionar World App.",
+      };
+      setWorldAccount(fallback);
+      return fallback;
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const installed = MiniKit.install();
+      setMiniKitReady(Boolean(installed?.success));
+      const walletAddress = tryNormalizeAddress(MiniKit.user?.walletAddress);
+      if (walletAddress) {
+        setAuthenticatedWorldAddress(walletAddress);
+        setExpectedAddressInput((current) => current || walletAddress);
+        void inspectExpectedWorldAccount(walletAddress);
+      }
+    } catch {
+      setMiniKitReady(false);
+    }
+  }, [inspectExpectedWorldAccount]);
+
+  const loginWithWorldId = useCallback(async () => {
+    if (!miniKitReady) {
+      showStatus("World ID solo puede autenticarse cuando la app se abre dentro de World App.", "warning");
+      return;
+    }
+
+    setAuthenticatingWorld(true);
+    try {
+      const nonceResponse = await fetch("/api/nonce", {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (!nonceResponse.ok) throw new Error("No se pudo crear nonce de autenticación.");
+      const { nonce } = await nonceResponse.json();
+
+      const authResult = await MiniKit.walletAuth({
+        nonce,
+        statement: WORLD_ID_STATEMENT,
+        expirationTime: new Date(Date.now() + 7 * 60 * 1000),
+      });
+
+      if (authResult?.executedWith === "fallback") {
+        throw new Error("La verificación debe ejecutarse dentro de World App.");
+      }
+
+      const payload = authResult?.data ?? authResult;
+      const completeResponse = await fetch("/api/complete-siwe", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload, nonce }),
+      });
+      const complete = await completeResponse.json();
+      if (!completeResponse.ok || !complete?.isValid) {
+        throw new Error(complete?.error || "No se pudo verificar la sesión World ID.");
+      }
+
+      const walletAddress = tryNormalizeAddress(
+        complete.address || payload?.address || MiniKit.user?.walletAddress,
+      );
+      if (!walletAddress) {
+        throw new Error("World ID no devolvió una dirección EVM válida.");
+      }
+
+      setAuthenticatedWorldAddress(walletAddress);
+      setExpectedAddressInput(walletAddress);
+      await inspectExpectedWorldAccount(walletAddress);
+      showStatus(`World ID autenticado: ${walletAddress}`, "success");
+    } catch (error) {
+      showStatus(error instanceof Error ? error.message : "No se pudo autenticar con World ID.", "error");
+    } finally {
+      setAuthenticatingWorld(false);
+    }
+  }, [inspectExpectedWorldAccount, miniKitReady, showStatus]);
 
   const scan = useCallback(async () => {
     if (!session?.address) return;
@@ -157,13 +265,13 @@ export default function App() {
   const importWallet = useCallback(async () => {
     try {
       const derived = deriveWallet(privateKeyInput);
-      const expectedAddress = normalizeAddress(expectedAddressInput);
-
-      if (derived.address !== expectedAddress) {
-        throw new Error(
-          "La llave privada no genera la misma dirección World App. Operaciones bloqueadas.",
-        );
-      }
+      const expectedAddress = tryNormalizeAddress(expectedAddressInput || authenticatedWorldAddress);
+      const inspection = await inspectExpectedWorldAccount(expectedAddress);
+      const diagnosis = createImportDiagnosis({
+        derivedAddress: derived.address,
+        expectedAddress,
+        worldAccount: inspection,
+      });
 
       const vault = await encryptVault(
         {
@@ -182,17 +290,31 @@ export default function App() {
       });
       setPrivateKeyInput("");
       setPasswordInput("");
-      setExpectedAddressInput("");
       setActiveTab("home");
-      showStatus("Wallet importada y cifrada localmente.", "success");
+      showStatus(
+        diagnosis.blocksOperation
+          ? `${diagnosis.title}. Revisa las direcciones mostradas antes de operar.`
+          : "Wallet importada, diagnosticada y cifrada localmente.",
+        diagnosis.blocksOperation ? "warning" : "success",
+      );
     } catch (error) {
       showStatus(error instanceof Error ? error.message : "No se pudo importar la wallet.", "error");
     }
-  }, [expectedAddressInput, passwordInput, privateKeyInput, showStatus]);
+  }, [
+    authenticatedWorldAddress,
+    expectedAddressInput,
+    inspectExpectedWorldAccount,
+    passwordInput,
+    privateKeyInput,
+    showStatus,
+  ]);
 
   const unlockWallet = useCallback(async () => {
     try {
       const unlocked = await decryptVault(storedVault, unlockPassword);
+      if (unlocked.expectedAddress) {
+        await inspectExpectedWorldAccount(unlocked.expectedAddress);
+      }
       setSession(unlocked);
       setUnlockPassword("");
       setActiveTab("home");
@@ -200,7 +322,7 @@ export default function App() {
     } catch {
       showStatus("Contraseña incorrecta o wallet local dañada.", "error");
     }
-  }, [storedVault, unlockPassword, showStatus]);
+  }, [inspectExpectedWorldAccount, storedVault, unlockPassword, showStatus]);
 
   const lockWallet = useCallback(() => {
     setSession(null);
@@ -240,8 +362,8 @@ export default function App() {
   const prepareSend = useCallback(async () => {
     try {
       if (!session?.privateKey || !selectedAsset) throw new Error("Selecciona un activo.");
-      if (!verifiedMatch) {
-        throw new Error("La dirección derivada no está verificada contra tu dirección World App.");
+      if (operationsBlocked) {
+        throw new Error(`${importDiagnosis.title}: ${importDiagnosis.detail}`);
       }
       normalizeAddress(recipient);
       if (!isPositiveAmount(amount)) throw new Error("Introduce una cantidad válida.");
@@ -266,11 +388,20 @@ export default function App() {
     } catch (error) {
       showStatus(error instanceof Error ? error.message : "No se pudo preparar el envío.", "error");
     }
-  }, [amount, recipient, selectedAsset, session?.privateKey, showStatus, verifiedMatch]);
+  }, [
+    amount,
+    importDiagnosis,
+    operationsBlocked,
+    recipient,
+    selectedAsset,
+    session?.privateKey,
+    showStatus,
+  ]);
 
   const confirmSend = useCallback(async () => {
     try {
       if (!session?.privateKey || !selectedAsset) return;
+      if (operationsBlocked) throw new Error(`${importDiagnosis.title}: ${importDiagnosis.detail}`);
       setSending(true);
       const cleanAmount = String(amount).trim().replace(",", ".");
       const result = await sendAsset({
@@ -291,7 +422,16 @@ export default function App() {
     } finally {
       setSending(false);
     }
-  }, [amount, recipient, scan, selectedAsset, session?.privateKey, showStatus]);
+  }, [
+    amount,
+    importDiagnosis,
+    operationsBlocked,
+    recipient,
+    scan,
+    selectedAsset,
+    session?.privateKey,
+    showStatus,
+  ]);
 
   const openTrade = useCallback(
     (action) => {
@@ -323,6 +463,33 @@ export default function App() {
 
         {!session && (
           <section className="view view--active">
+            <article className="card">
+              <span className="eyebrow">World ID opcional</span>
+              <h2>Dirección autenticada de World App</h2>
+              <p className="muted">
+                Si abres esta versión desde World App, puedes traer la dirección oficial para compararla con la llave privada importada.
+              </p>
+              <button
+                className="button button--primary"
+                type="button"
+                onClick={loginWithWorldId}
+                disabled={!miniKitReady || authenticatingWorld}
+              >
+                {authenticatingWorld
+                  ? "Verificando World ID..."
+                  : miniKitReady
+                    ? "Iniciar sesión con World ID"
+                    : "World ID disponible dentro de World App"}
+              </button>
+              {authenticatedWorldAddress ? (
+                <div className="diagnostic-box">
+                  <span>Dirección World App autenticada</span>
+                  <code>{authenticatedWorldAddress}</code>
+                </div>
+              ) : (
+                <p className="muted">También puedes pegar manualmente la dirección World App esperada abajo.</p>
+              )}
+            </article>
             {storedVault ? (
               <article className="card">
                 <span className="eyebrow">Wallet cifrada detectada</span>
@@ -384,6 +551,15 @@ export default function App() {
                     spellCheck="false"
                   />
                 </label>
+                {(expectedAddressInput || authenticatedWorldAddress) && (
+                  <div className="diagnostic-box">
+                    <span>Dirección esperada para comparar</span>
+                    <code>
+                      {tryNormalizeAddress(expectedAddressInput || authenticatedWorldAddress) ||
+                        "Formato EVM no válido todavía"}
+                    </code>
+                  </div>
+                )}
                 <label className="label">
                   Contraseña para cifrar en este teléfono
                   <input
@@ -408,11 +584,44 @@ export default function App() {
               <article className="wallet-card">
                 <span className="eyebrow">Wallet local</span>
                 <h2>{compactAddress(session.address)}</h2>
-                <p className={verifiedMatch ? "match" : "mismatch"}>
+                <p className={operationsBlocked ? "mismatch" : "match"}>
                   {verifiedMatch
                     ? "Dirección verificada contra World App."
-                    : "Dirección no verificada. Envíos bloqueados."}
+                    : operationsBlocked
+                      ? importDiagnosis.title
+                      : "Wallet derivada sin discrepancia comprobada."}
                 </p>
+                <div className={`diagnostic-box ${operationsBlocked ? "diagnostic-box--blocked" : ""}`}>
+                  <span>Diagnóstico de dirección</span>
+                  <strong>{importDiagnosis.title}</strong>
+                  <p>{importDiagnosis.detail}</p>
+                  <div className="diagnostic-grid">
+                    <div>
+                      <small>Derivada desde la llave</small>
+                      <code>{importDiagnosis.derivedAddress || session.address}</code>
+                    </div>
+                    <div>
+                      <small>World App esperada</small>
+                      <code>{importDiagnosis.expectedAddress || "No verificada"}</code>
+                    </div>
+                  </div>
+                  {worldAccount?.accountKind && (
+                    <p className="muted">
+                      Cuenta World App: {worldAccount.accountKind}
+                      {worldAccount.safe?.detected
+                        ? ` · Safe threshold ${worldAccount.safe.threshold}/${worldAccount.safe.owners.length}`
+                        : ""}
+                    </p>
+                  )}
+                  {worldAccount?.safe?.owners?.length ? (
+                    <details className="details">
+                      <summary>Owners Safe detectados</summary>
+                      {worldAccount.safe.owners.map((owner) => (
+                        <code className="address" key={owner}>{owner}</code>
+                      ))}
+                    </details>
+                  ) : null}
+                </div>
                 <div className="quick-grid">
                   <button className="quick" type="button" onClick={() => setActiveTab("send")}>Enviar</button>
                   <button className="quick" type="button" onClick={() => setActiveTab("home")}>Recibir</button>
@@ -489,8 +698,8 @@ export default function App() {
               <article className="card">
                 <span className="eyebrow">Enviar fondos</span>
                 <h2>{selectedAsset ? `${selectedAsset.symbol} en ${selectedAsset.networkName}` : "Selecciona un activo"}</h2>
-                {!verifiedMatch && (
-                  <p className="warning">Operaciones bloqueadas: la dirección derivada no coincide con la dirección World App esperada.</p>
+                {operationsBlocked && (
+                  <p className="warning">Operaciones bloqueadas: {importDiagnosis.title}. {importDiagnosis.detail}</p>
                 )}
                 <label className="label">
                   Activo
@@ -522,7 +731,7 @@ export default function App() {
                 {selectedAsset && (
                   <p className="muted">Disponible: {selectedAsset.displayBalance} {selectedAsset.symbol}</p>
                 )}
-                <button className="button button--primary" type="button" disabled={!selectedAsset || !verifiedMatch} onClick={prepareSend}>
+                <button className="button button--primary" type="button" disabled={!selectedAsset || operationsBlocked} onClick={prepareSend}>
                   Estimar gas y revisar
                 </button>
                 {lastTx && (

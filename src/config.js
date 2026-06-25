@@ -3,6 +3,9 @@ export const STORAGE_KEYS = Object.freeze({
   customTokens: "rc_wallet_external_custom_tokens_v1",
 });
 
+export const WORLD_CHAIN_ID = 480;
+export const SAFE_SENTINEL = "0x0000000000000000000000000000000000000001";
+
 export const NETWORKS = Object.freeze([
   {
     name: "Ethereum",
@@ -161,6 +164,17 @@ export const ERC20_ABI = Object.freeze([
   "function symbol() view returns (string)",
   "function name() view returns (string)",
   "function transfer(address to, uint256 value) returns (bool)",
+]);
+
+export const SAFE_INTROSPECTION_ABI = Object.freeze([
+  "function VERSION() view returns (string)",
+  "function getOwners() view returns (address[])",
+  "function getThreshold() view returns (uint256)",
+  "function getModulesPaginated(address start, uint256 pageSize) view returns (address[] array, address next)",
+]);
+
+export const ERC1271_ABI = Object.freeze([
+  "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)",
 ]);
 
 export const EXTERNAL_PROVIDERS = Object.freeze({

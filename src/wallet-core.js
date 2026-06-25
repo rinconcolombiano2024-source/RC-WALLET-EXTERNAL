@@ -1,5 +1,14 @@
 import { ethers } from "ethers";
-import { ERC20_ABI, NETWORKS, STORAGE_KEYS, TOKENS } from "./config.js";
+import {
+  ERC1271_ABI,
+  ERC20_ABI,
+  NETWORKS,
+  SAFE_INTROSPECTION_ABI,
+  SAFE_SENTINEL,
+  STORAGE_KEYS,
+  TOKENS,
+  WORLD_CHAIN_ID,
+} from "./config.js";
 
 const providerCache = new Map();
 const encoder = new TextEncoder();
@@ -22,7 +31,7 @@ function randomBytes(length) {
 function cleanAddressInput(address) {
   return String(address ?? "")
     .trim()
-    .replace(/[\u200B-\u200D\uFEFF]/g, "");
+    .replace(/[\s\u200B-\u200D\uFEFF]/g, "");
 }
 
 export function normalizeAddress(address) {
@@ -39,6 +48,14 @@ export function normalizeAddress(address) {
   }
 
   return ethers.getAddress(candidate.toLowerCase());
+}
+
+export function tryNormalizeAddress(address) {
+  try {
+    return normalizeAddress(address);
+  } catch {
+    return "";
+  }
 }
 
 export function normalizePrivateKey(input) {
@@ -63,6 +80,16 @@ export function deriveWallet(privateKey) {
     privateKey: normalizedPrivateKey,
     address: ethers.getAddress(wallet.address),
   };
+}
+
+export function compareAddresses(left, right) {
+  const normalizedLeft = tryNormalizeAddress(left);
+  const normalizedRight = tryNormalizeAddress(right);
+  return Boolean(
+    normalizedLeft &&
+      normalizedRight &&
+      normalizedLeft.toLowerCase() === normalizedRight.toLowerCase(),
+  );
 }
 
 export function formatBalance(rawBalance, decimals, digits = 6) {
@@ -212,6 +239,231 @@ export async function getProvider(network) {
   }
 
   throw new Error(`No hay RPC disponible para ${network.name}.`);
+}
+
+async function inspectSafe(provider, address, hasCode) {
+  if (!hasCode) {
+    return {
+      detected: false,
+      reason: "No hay contrato desplegado en esta red.",
+    };
+  }
+
+  const contract = new ethers.Contract(address, SAFE_INTROSPECTION_ABI, provider);
+  const [ownersResult, thresholdResult, versionResult] = await Promise.allSettled([
+    timeout(contract.getOwners(), 8_000, "Safe owners"),
+    timeout(contract.getThreshold(), 8_000, "Safe threshold"),
+    timeout(contract.VERSION(), 8_000, "Safe version"),
+  ]);
+
+  if (
+    ownersResult.status !== "fulfilled" ||
+    thresholdResult.status !== "fulfilled"
+  ) {
+    return {
+      detected: false,
+      reason: "La cuenta tiene bytecode, pero no responde como Safe estándar.",
+    };
+  }
+
+  const owners = Array.isArray(ownersResult.value)
+    ? ownersResult.value.filter(ethers.isAddress).map((item) => ethers.getAddress(item))
+    : [];
+  const threshold = Number(thresholdResult.value);
+
+  if (!owners.length || !Number.isFinite(threshold) || threshold <= 0) {
+    return {
+      detected: false,
+      reason: "Safe respondió datos no válidos.",
+    };
+  }
+
+  let modules = [];
+  let modulesReadable = false;
+  try {
+    const page = await timeout(
+      contract.getModulesPaginated(SAFE_SENTINEL, 10),
+      8_000,
+      "Safe modules",
+    );
+    modules = Array.isArray(page?.[0])
+      ? page[0].filter(ethers.isAddress).map((item) => ethers.getAddress(item))
+      : [];
+    modulesReadable = true;
+  } catch {
+    modulesReadable = false;
+  }
+
+  return {
+    detected: true,
+    version:
+      versionResult.status === "fulfilled" && versionResult.value
+        ? String(versionResult.value)
+        : "desconocida",
+    owners,
+    threshold,
+    modules,
+    modulesReadable,
+  };
+}
+
+async function inspectEip1271(provider, address, hasCode) {
+  if (!hasCode) {
+    return {
+      checked: false,
+      supported: false,
+      reason: "EIP-1271 solo aplica a smart accounts.",
+    };
+  }
+
+  const iface = new ethers.Interface(ERC1271_ABI);
+  try {
+    const data = iface.encodeFunctionData("isValidSignature", [
+      ethers.ZeroHash,
+      "0x",
+    ]);
+    await timeout(provider.call({ to: address, data }), 8_000, "EIP-1271");
+    return {
+      checked: true,
+      supported: true,
+      reason: "La cuenta expone isValidSignature.",
+    };
+  } catch (error) {
+    return {
+      checked: true,
+      supported: false,
+      reason:
+        error instanceof Error
+          ? error.message
+          : "La cuenta no respondió a EIP-1271.",
+    };
+  }
+}
+
+export async function inspectWorldAppAccount(address) {
+  const normalizedAddress = normalizeAddress(address);
+  const worldNetwork = NETWORKS.find((network) => network.chainId === WORLD_CHAIN_ID);
+  if (!worldNetwork) {
+    throw new Error("World Chain no está configurada.");
+  }
+
+  const provider = await getProvider(worldNetwork);
+  const [code, nativeBalance] = await Promise.all([
+    timeout(provider.getCode(normalizedAddress), 8_000, "World account code"),
+    timeout(provider.getBalance(normalizedAddress), 8_000, "World account balance"),
+  ]);
+  const hasCode = Boolean(code && code !== "0x");
+  const [safe, erc1271] = await Promise.all([
+    inspectSafe(provider, normalizedAddress, hasCode),
+    inspectEip1271(provider, normalizedAddress, hasCode),
+  ]);
+
+  return {
+    address: normalizedAddress,
+    chainId: WORLD_CHAIN_ID,
+    networkName: worldNetwork.name,
+    hasCode,
+    accountKind: safe.detected
+      ? "safe-smart-account"
+      : hasCode
+        ? "smart-account-or-contract"
+        : "eoa-or-undeployed",
+    codeHash: hasCode ? ethers.keccak256(code) : null,
+    nativeBalance: {
+      wei: nativeBalance.toString(),
+      displayBalance: formatBalance(nativeBalance, 18),
+      symbol: worldNetwork.symbol,
+    },
+    safe,
+    erc1271,
+  };
+}
+
+export function createImportDiagnosis({
+  derivedAddress,
+  expectedAddress,
+  worldAccount,
+}) {
+  const normalizedDerived = tryNormalizeAddress(derivedAddress);
+  const normalizedExpected = tryNormalizeAddress(expectedAddress);
+
+  if (!normalizedDerived) {
+    return {
+      status: "invalid-derived",
+      blocksOperation: true,
+      title: "Dirección derivada inválida",
+      detail: "La llave privada no generó una dirección EVM válida.",
+      derivedAddress: "",
+      expectedAddress: normalizedExpected,
+    };
+  }
+
+  if (!normalizedExpected) {
+    return {
+      status: "unverified",
+      blocksOperation: false,
+      title: "Wallet derivada sin comparación World App",
+      detail:
+        "No hay dirección World App esperada. Puedes operar esta llave, pero no queda demostrado que pertenezca a World App.",
+      derivedAddress: normalizedDerived,
+      expectedAddress: "",
+      worldAccount,
+    };
+  }
+
+  if (compareAddresses(normalizedDerived, normalizedExpected)) {
+    return {
+      status: "match",
+      blocksOperation: false,
+      title: "Coincidencia exacta",
+      detail: "La llave privada genera exactamente la dirección World App esperada.",
+      derivedAddress: normalizedDerived,
+      expectedAddress: normalizedExpected,
+      worldAccount,
+    };
+  }
+
+  const safeOwners = worldAccount?.safe?.owners ?? [];
+  const derivedIsSafeOwner = safeOwners.some((owner) =>
+    compareAddresses(owner, normalizedDerived),
+  );
+
+  if (derivedIsSafeOwner) {
+    return {
+      status: "safe-owner-not-safe-address",
+      blocksOperation: true,
+      title: "La llave parece owner de una Safe, no la dirección Safe",
+      detail:
+        "La dirección World App esperada es una Safe/smart account. La llave derivada es owner, pero no es la dirección que contiene los fondos. Para mover fondos se requiere ejecución Safe real con threshold/módulos.",
+      derivedAddress: normalizedDerived,
+      expectedAddress: normalizedExpected,
+      worldAccount,
+    };
+  }
+
+  if (worldAccount?.hasCode) {
+    return {
+      status: "smart-account-mismatch",
+      blocksOperation: true,
+      title: "World App usa smart account o contrato",
+      detail:
+        "La dirección esperada tiene bytecode en World Chain. Una llave EOA distinta no puede mover directamente fondos de esa smart account.",
+      derivedAddress: normalizedDerived,
+      expectedAddress: normalizedExpected,
+      worldAccount,
+    };
+  }
+
+  return {
+    status: "mismatch",
+    blocksOperation: true,
+    title: "La llave privada no corresponde a la dirección esperada",
+    detail:
+      "La dirección derivada y la dirección World App esperada son diferentes. Revisa que la llave exportada sea la correcta.",
+    derivedAddress: normalizedDerived,
+    expectedAddress: normalizedExpected,
+    worldAccount,
+  };
 }
 
 async function readToken(provider, network, owner, token) {
