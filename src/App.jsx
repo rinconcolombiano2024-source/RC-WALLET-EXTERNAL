@@ -33,6 +33,13 @@ const TABS = Object.freeze([
 ]);
 
 const WORLD_ID_STATEMENT = "Iniciar sesión en RC Wallet Externa";
+const WORLD_OIDC_CLIENT_ID =
+  import.meta.env.VITE_WORLD_CLIENT_ID ||
+  import.meta.env.VITE_WORLD_APP_ID ||
+  "app_f4a98191ddc786151b045abc9fcef81b";
+const WORLD_OIDC_AUTHORIZE_URL = "https://id.worldcoin.org/authorize";
+const WORLD_OIDC_STATE_KEY = "rc_wallet_world_oidc_state";
+const WORLD_OIDC_NONCE_KEY = "rc_wallet_world_oidc_nonce";
 
 function Status({ status }) {
   if (!status.message) return null;
@@ -45,6 +52,102 @@ function isPositiveAmount(value) {
 
 function qrImageUrl(value) {
   return `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(value)}`;
+}
+
+function randomUrlSafe(bytes = 16) {
+  const buffer = new Uint8Array(bytes);
+  crypto.getRandomValues(buffer);
+  return btoa(String.fromCharCode(...buffer))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function getWorldRedirectUri() {
+  return `${window.location.origin}${window.location.pathname}`;
+}
+
+function decodeJwtPayload(token) {
+  const payload = String(token ?? "").split(".")[1];
+  if (!payload) return null;
+  const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = `${base64}${"=".repeat((4 - (base64.length % 4)) % 4)}`;
+  try {
+    return JSON.parse(decodeURIComponent(escape(atob(padded))));
+  } catch {
+    try {
+      return JSON.parse(atob(padded));
+    } catch {
+      return null;
+    }
+  }
+}
+
+function buildWorldOidcUrl() {
+  const state = randomUrlSafe(18);
+  const nonce = randomUrlSafe(18);
+  sessionStorage.setItem(WORLD_OIDC_STATE_KEY, state);
+  sessionStorage.setItem(WORLD_OIDC_NONCE_KEY, nonce);
+
+  const url = new URL(WORLD_OIDC_AUTHORIZE_URL);
+  url.searchParams.set("response_type", "id_token");
+  url.searchParams.set("scope", "openid profile");
+  url.searchParams.set("client_id", WORLD_OIDC_CLIENT_ID);
+  url.searchParams.set("redirect_uri", getWorldRedirectUri());
+  url.searchParams.set("response_mode", "fragment");
+  url.searchParams.set("state", state);
+  url.searchParams.set("nonce", nonce);
+  return url.toString();
+}
+
+function readWorldOidcCallback() {
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const queryParams = new URLSearchParams(window.location.search);
+  const idToken = hashParams.get("id_token") || queryParams.get("id_token");
+  const state = hashParams.get("state") || queryParams.get("state");
+  const error = hashParams.get("error") || queryParams.get("error");
+
+  if (error) {
+    return {
+      error,
+      errorDescription:
+        hashParams.get("error_description") || queryParams.get("error_description") || "",
+    };
+  }
+
+  if (!idToken) return null;
+
+  const expectedState = sessionStorage.getItem(WORLD_OIDC_STATE_KEY);
+  if (expectedState && state !== expectedState) {
+    return {
+      error: "invalid_state",
+      errorDescription: "La respuesta de World ID no coincide con la sesión iniciada.",
+    };
+  }
+
+  const payload = decodeJwtPayload(idToken);
+  if (!payload?.sub) {
+    return {
+      error: "invalid_token",
+      errorDescription: "World ID devolvió una sesión sin identificador válido.",
+    };
+  }
+
+  sessionStorage.removeItem(WORLD_OIDC_STATE_KEY);
+  sessionStorage.removeItem(WORLD_OIDC_NONCE_KEY);
+  window.history.replaceState(null, "", getWorldRedirectUri());
+
+  return {
+    subject: payload.sub,
+    name: payload.name || "",
+    email: payload.email || "",
+    verificationLevel:
+      payload["https://id.worldcoin.org/v1"]?.verification_level ||
+      payload["https://id.worldcoin.org/beta"]?.credential_type ||
+      "",
+    issuedAt: payload.iat ? new Date(payload.iat * 1000).toISOString() : "",
+    expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : "",
+  };
 }
 
 function tradeUrl(action, asset) {
@@ -89,6 +192,8 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState("");
   const [showPrivateKey, setShowPrivateKey] = useState(false);
   const [authenticatingWorld, setAuthenticatingWorld] = useState(false);
+  const [worldOidcUrl, setWorldOidcUrl] = useState("");
+  const [worldOidcSession, setWorldOidcSession] = useState(null);
   const [authenticatedWorldAddress, setAuthenticatedWorldAddress] = useState("");
   const [worldAccount, setWorldAccount] = useState(null);
   const [assets, setAssets] = useState([]);
@@ -155,6 +260,32 @@ export default function App() {
       return fallback;
     }
   }, []);
+
+  useEffect(() => {
+    const callback = readWorldOidcCallback();
+    if (callback?.error) {
+      showStatus(
+        callback.errorDescription || `World ID respondió con error: ${callback.error}`,
+        "error",
+      );
+      setWorldOidcUrl(buildWorldOidcUrl());
+      return;
+    }
+
+    if (callback?.subject) {
+      setWorldOidcSession(callback);
+      showStatus("World ID autenticado oficialmente por QR/OIDC.", "success");
+      setWorldOidcUrl(buildWorldOidcUrl());
+      return;
+    }
+
+    setWorldOidcUrl(buildWorldOidcUrl());
+  }, [showStatus]);
+
+  const refreshWorldQrLogin = useCallback(() => {
+    setWorldOidcUrl(buildWorldOidcUrl());
+    showStatus("QR oficial de World ID renovado.", "info");
+  }, [showStatus]);
 
   const loginWithWorldId = useCallback(async () => {
     setAuthenticatingWorld(true);
@@ -454,16 +585,68 @@ export default function App() {
               <p className="muted">
                 Si abres esta versión desde World App, puedes traer la dirección oficial para compararla con la llave privada importada.
               </p>
-              <button
-                className="button button--primary"
-                type="button"
-                onClick={loginWithWorldId}
-                disabled={authenticatingWorld}
-              >
-                {authenticatingWorld
-                  ? "Verificando World ID..."
-                  : "Iniciar sesión con World ID"}
-              </button>
+              <div className="diagnostic-box">
+                <span>QR hacia login oficial World ID</span>
+                <p>
+                  Escanea este QR con World App para iniciar sesión oficialmente. Este flujo confirma World ID, pero por estándar OIDC no entrega por sí solo la dirección EVM donde están los fondos.
+                </p>
+                {worldOidcUrl && (
+                  <>
+                    <img className="qr" src={qrImageUrl(worldOidcUrl)} alt="QR hacia inicio oficial con World ID" />
+                    <code>{worldOidcUrl}</code>
+                  </>
+                )}
+                <div className="button-row">
+                  <button className="button button--secondary" type="button" onClick={refreshWorldQrLogin}>
+                    Renovar QR
+                  </button>
+                  {worldOidcUrl && (
+                    <button
+                      className="button button--primary"
+                      type="button"
+                      onClick={() => window.open(worldOidcUrl, "_blank", "noopener,noreferrer")}
+                    >
+                      Abrir login oficial
+                    </button>
+                  )}
+                </div>
+              </div>
+              {worldOidcSession && (
+                <div className="diagnostic-box">
+                  <span>World ID autenticado por OIDC</span>
+                  <strong>{worldOidcSession.name || "World ID User"}</strong>
+                  <p>Estado: sesión World ID recibida correctamente.</p>
+                  <div className="diagnostic-grid">
+                    <div>
+                      <small>Subject World ID</small>
+                      <code>{worldOidcSession.subject}</code>
+                    </div>
+                    <div>
+                      <small>Nivel / credencial</small>
+                      <code>{worldOidcSession.verificationLevel || "No informado"}</code>
+                    </div>
+                  </div>
+                  <p className="muted">
+                    Diagnóstico: este identificador no es una dirección EVM. Para comparar fondos se necesita Wallet Auth/MiniKit o una dirección World App pegada manualmente.
+                  </p>
+                </div>
+              )}
+              <div className="diagnostic-box">
+                <span>Dirección EVM por Wallet Auth</span>
+                <p>
+                  Usa esta opción dentro de World App para obtener la dirección SIWE que World App firma. Esa es la dirección útil para comparar con la llave privada derivada.
+                </p>
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={loginWithWorldId}
+                  disabled={authenticatingWorld}
+                >
+                  {authenticatingWorld
+                    ? "Verificando World ID..."
+                    : "Obtener dirección con World App"}
+                </button>
+              </div>
               {authenticatedWorldAddress ? (
                 <div className="diagnostic-box">
                   <span>Dirección World App autenticada</span>
