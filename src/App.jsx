@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ethers } from "ethers";
 import { EXTERNAL_PROVIDERS, NETWORKS } from "./config.js";
 import {
@@ -33,16 +33,6 @@ const TABS = Object.freeze([
 ]);
 
 const WORLD_ID_STATEMENT = "Iniciar sesión en RC Wallet Externa";
-const WORLD_ID_APP_ID =
-  import.meta.env.VITE_WORLD_APP_ID ||
-  "app_f4a98191ddc786151b045abc9fcef81b";
-const WORLD_ID_RP_ID =
-  import.meta.env.VITE_WORLD_RP_ID ||
-  import.meta.env.VITE_WORLD_CLIENT_ID ||
-  "rp_44f2772c9e0bb5c3";
-const WORLD_ID_ACTION =
-  import.meta.env.VITE_WORLD_ID_ACTION ||
-  "rc-wallet-login";
 const RC_WALLET_MINI_APP_URL =
   import.meta.env.VITE_RC_WALLET_MINIAPP_URL ||
   import.meta.env.VITE_MINI_APP_URL ||
@@ -107,10 +97,7 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState("");
   const [showPrivateKey, setShowPrivateKey] = useState(false);
   const [authenticatingWorld, setAuthenticatingWorld] = useState(false);
-  const [worldIdQrLoading, setWorldIdQrLoading] = useState(false);
-  const [worldIdConnectorUrl, setWorldIdConnectorUrl] = useState("");
-  const [worldIdProof, setWorldIdProof] = useState(null);
-  const [miniAppUrl, setMiniAppUrl] = useState(() => getMiniAppUrl());
+  const [miniAppUrl] = useState(() => getMiniAppUrl());
   const [authenticatedWorldAddress, setAuthenticatedWorldAddress] = useState("");
   const [worldAccount, setWorldAccount] = useState(null);
   const [assets, setAssets] = useState([]);
@@ -130,9 +117,6 @@ export default function App() {
     type: "info",
     message: "RC Wallet Externa firma localmente. Ninguna llave se envía al servidor.",
   });
-
-  const worldIdRequestRef = useRef(0);
-  const worldIdAutoStartedRef = useRef(false);
 
   const selectedAsset = useMemo(
     () => assets.find((asset) => asset.id === selectedAssetId) ?? assets[0] ?? null,
@@ -180,84 +164,6 @@ export default function App() {
       return fallback;
     }
   }, []);
-
-  const refreshWorldQrLogin = useCallback(async () => {
-    const requestId = worldIdRequestRef.current + 1;
-    worldIdRequestRef.current = requestId;
-    setWorldIdQrLoading(true);
-    setWorldIdProof(null);
-    setWorldIdConnectorUrl("");
-    setMiniAppUrl(getMiniAppUrl());
-
-    try {
-      if (!WORLD_ID_APP_ID || !WORLD_ID_RP_ID || !WORLD_ID_ACTION) {
-        throw new Error("Faltan variables World ID: VITE_WORLD_APP_ID, VITE_WORLD_CLIENT_ID/VITE_WORLD_RP_ID o VITE_WORLD_ID_ACTION.");
-      }
-
-      const rpResponse = await fetch("/api/rp-signature", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: WORLD_ID_ACTION }),
-      });
-      const rpSignature = await rpResponse.json().catch(() => ({}));
-      if (!rpResponse.ok) {
-        throw new Error(rpSignature?.error || "No se pudo generar la firma RP de World ID.");
-      }
-
-      const { IDKit, orbLegacy } = await import("@worldcoin/idkit-core");
-      const request = await IDKit.request({
-        app_id: WORLD_ID_APP_ID,
-        action: WORLD_ID_ACTION,
-        rp_context: {
-          rp_id: WORLD_ID_RP_ID,
-          nonce: rpSignature.nonce,
-          created_at: rpSignature.created_at,
-          expires_at: rpSignature.expires_at,
-          signature: rpSignature.sig,
-        },
-        allow_legacy_proofs: true,
-        environment: "production",
-      }).preset(orbLegacy({ signal: "rc-wallet-external" }));
-
-      if (requestId !== worldIdRequestRef.current) return;
-
-      setWorldIdConnectorUrl(request.connectorURI);
-      setWorldIdQrLoading(false);
-      showStatus("QR oficial de World ID listo. Escanéalo con World App.", "info");
-
-      const idkitResponse = await request.pollUntilCompletion();
-      if (requestId !== worldIdRequestRef.current) return;
-
-      const verifyResponse = await fetch("/api/verify-proof", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rp_id: WORLD_ID_RP_ID,
-          idkitResponse,
-        }),
-      });
-      const verification = await verifyResponse.json().catch(() => ({}));
-      if (!verifyResponse.ok || !verification?.success) {
-        throw new Error(verification?.error || "World ID no pudo verificar la prueba.");
-      }
-
-      setWorldIdProof({
-        verifiedAt: new Date().toISOString(),
-        action: idkitResponse?.action || WORLD_ID_ACTION,
-        protocolVersion: idkitResponse?.protocol_version || "",
-        nullifier:
-          idkitResponse?.responses?.[0]?.nullifier ||
-          idkitResponse?.proof?.nullifier_hash ||
-          idkitResponse?.nullifier_hash ||
-          "",
-      });
-      showStatus("World ID verificado correctamente. Para obtener dirección EVM usa Wallet Auth dentro de World App.", "success");
-    } catch (error) {
-      if (requestId !== worldIdRequestRef.current) return;
-      setWorldIdQrLoading(false);
-      showStatus(error instanceof Error ? error.message : "No se pudo crear el QR oficial de World ID.", "error");
-    }
-  }, [showStatus]);
 
   const loginWithWorldId = useCallback(async () => {
     setAuthenticatingWorld(true);
@@ -349,12 +255,6 @@ export default function App() {
   useEffect(() => {
     writeCustomTokens(customTokens);
   }, [customTokens]);
-
-  useEffect(() => {
-    if (session || worldIdAutoStartedRef.current) return;
-    worldIdAutoStartedRef.current = true;
-    void refreshWorldQrLogin();
-  }, [refreshWorldQrLogin, session]);
 
   const importWallet = useCallback(async () => {
     try {
@@ -558,64 +458,35 @@ export default function App() {
         {!session && (
           <section className="view view--active">
             <article className="card">
-              <span className="eyebrow">World ID opcional</span>
+              <span className="eyebrow">World App opcional</span>
               <h2>Dirección autenticada de World App</h2>
               <p className="muted">
                 Si abres esta versión desde World App, puedes traer la dirección oficial para compararla con la llave privada importada.
               </p>
               <div className="diagnostic-box">
-                <span>QR oficial de World ID</span>
+                <span>Conexión World App</span>
                 <p>
-                  Escanea este QR con World App para verificar World ID con IDKit oficial. Esta prueba confirma identidad World ID; la dirección EVM se obtiene aparte con Wallet Auth.
+                  El login web antiguo de World ID fue retirado. Para evitar errores, RC Wallet Externa mantiene la validación profesional por Wallet Auth únicamente cuando se abre dentro de World App.
                 </p>
-                {worldIdConnectorUrl ? (
-                  <>
-                    <img className="qr" src={qrImageUrl(worldIdConnectorUrl)} alt="QR oficial de World ID para RC Wallet Externa" />
-                    <code>{worldIdConnectorUrl}</code>
-                  </>
-                ) : (
-                  <p className="muted">
-                    {worldIdQrLoading
-                      ? "Generando QR oficial de World ID..."
-                      : "Pulsa Renovar QR para crear un login oficial de World ID."}
-                  </p>
-                )}
-                {worldIdProof && (
-                  <div className="diagnostic-box">
-                    <span>World ID verificado</span>
-                    <small>Acción: {worldIdProof.action}</small>
-                    {worldIdProof.protocolVersion && <small>Protocolo: {worldIdProof.protocolVersion}</small>}
-                    {worldIdProof.nullifier && <code>{worldIdProof.nullifier}</code>}
-                  </div>
-                )}
                 <div className="button-row">
-                  <button
-                    className="button button--secondary"
-                    type="button"
-                    onClick={refreshWorldQrLogin}
-                    disabled={worldIdQrLoading}
-                  >
-                    {worldIdQrLoading ? "Preparando QR..." : "Renovar QR"}
-                  </button>
-                  {worldIdConnectorUrl && (
+                  {miniAppUrl && (
                     <button
                       className="button button--primary"
                       type="button"
-                      onClick={() => window.open(worldIdConnectorUrl, "_blank", "noopener,noreferrer")}
+                      onClick={() => window.open(miniAppUrl, "_blank", "noopener,noreferrer")}
                     >
-                      Abrir login oficial
+                      Abrir RC Wallet dentro de World App
                     </button>
                   )}
-                </div>
-                {miniAppUrl && (
                   <button
                     className="button button--secondary"
                     type="button"
-                    onClick={() => window.open(miniAppUrl, "_blank", "noopener,noreferrer")}
+                    onClick={loginWithWorldId}
+                    disabled={authenticatingWorld}
                   >
-                    Abrir RC Wallet dentro de World App
+                    {authenticatingWorld ? "Verificando..." : "Leer dirección con Wallet Auth"}
                   </button>
-                )}
+                </div>
               </div>
               <div className="diagnostic-box">
                 <span>Dirección EVM por Wallet Auth</span>
