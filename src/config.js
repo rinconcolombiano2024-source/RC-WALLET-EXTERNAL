@@ -1,159 +1,261 @@
-export const STORAGE_KEYS = Object.freeze({
-  vault: "rc_wallet_external_encrypted_vault_v1",
-  customTokens: "rc_wallet_external_custom_tokens_v1",
-});
-
 export const WORLD_CHAIN_ID = 480;
-export const SAFE_SENTINEL = "0x0000000000000000000000000000000000000001";
+
+export const ADMIN_FEE_WALLET = "0x0BbBd8EBa77dB629721CcdFa0C57a9ee107fdB85";
+export const RECOVERY_FEE_BPS = 0n;
+export const BPS_DENOMINATOR = 10_000n;
+
+export const RCPL_TOKEN_ADDRESS = "0xb9DEe79d682f9dA8B95761036f2763cdE25bD3e8";
+export const RCPL_TARGET_PRICE_KEY = "rc_wallet_rcpl_target_price_v1";
+export const RCPL_STAKING_CONTRACT = "";
+export const RCPL_POOL_MANAGER_CONTRACT = "";
+
+export const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
+export const ERC4337_ENTRYPOINTS = Object.freeze([
+  {
+    version: "v0.6",
+    address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+    label: "EntryPoint ERC-4337 v0.6",
+  },
+]);
+
+export const RECOVERY_ROUTE_CATALOG = Object.freeze([
+  {
+    id: "world-minikit",
+    name: "World App MiniKit",
+    requirement: "World Chain, sesión World App válida y allowlist en Developer Portal",
+  },
+  {
+    id: "external-signer",
+    name: "Wallet externa EIP-1193 / WalletConnect",
+    requirement: "La wallet debe firmar exactamente desde la misma dirección donde están los fondos",
+  },
+  {
+    id: "safe-multichain",
+    name: "Safe / contrato espejo determinístico",
+    requirement: "Owners, threshold, factory, singleton, initializer y salt verificables",
+  },
+  {
+    id: "erc-1271",
+    name: "Firma de contrato EIP-1271",
+    requirement: "El contrato debe validar firmas mediante isValidSignature",
+  },
+  {
+    id: "erc-4337",
+    name: "ERC-4337 UserOperation",
+    requirement: "EntryPoint, bundler, módulo compatible y firma válida de owners",
+  },
+  {
+    id: "bridge",
+    name: "Bridge / salida a exchange",
+    requirement: "Firma válida en la red origen y gas suficiente",
+  },
+]);
+
+export const WORLD_CHAIN_BRIDGES = Object.freeze([
+  {
+    name: "Alchemy Bridge",
+    url: "https://worldchain-mainnet.bridge.alchemy.com",
+    type: "native",
+    note: "Bridge nativo de World Chain para depositar y retirar activos.",
+  },
+  {
+    name: "Superbridge",
+    url: "https://superbridge.app/world-chain",
+    type: "native",
+    note: "Interfaz Superchain para ETH y ERC20 entre Ethereum y World Chain.",
+  },
+  {
+    name: "Across",
+    url: "https://app.across.to",
+    type: "third-party",
+    note: "Proveedor recomendado por World para rutas WLD entre World Chain y otras redes.",
+  },
+  {
+    name: "Brid.gg",
+    url: "https://brid.gg",
+    type: "third-party",
+    note: "Bridge para Ethereum y OP Chains, incluyendo World Chain.",
+  },
+  {
+    name: "Synapse",
+    url: "https://synapseprotocol.com",
+    type: "third-party",
+    note: "Bridge externo para transferencias entre redes compatibles.",
+  },
+  {
+    name: "Thirdweb Universal Bridge",
+    url: "https://portal.thirdweb.com/connect/pay",
+    type: "third-party",
+    note: "Ruta universal para onramp, swap y bridge en redes EVM compatibles.",
+  },
+]);
 
 export const NETWORKS = Object.freeze([
   {
-    name: "Ethereum",
-    shortName: "ETH",
-    chainId: 1,
-    chainHex: "0x1",
-    symbol: "ETH",
-    rpcUrls: ["https://ethereum-rpc.publicnode.com", "https://cloudflare-eth.com"],
-    explorer: "https://etherscan.io",
-    dex: "uniswap",
-  },
-  {
     name: "World Chain",
-    shortName: "World",
     chainId: 480,
     chainHex: "0x1e0",
     symbol: "ETH",
-    rpcUrls: ["https://worldchain-mainnet.g.alchemy.com/public"],
+    rpcUrls: [
+      "https://worldchain-mainnet.g.alchemy.com/public",
+    ],
     explorer: "https://worldscan.org",
-    dex: "uniswap",
+    writableWithMiniKit: true,
   },
   {
-    name: "Base",
-    shortName: "Base",
-    chainId: 8453,
-    chainHex: "0x2105",
+    name: "Ethereum",
+    chainId: 1,
+    chainHex: "0x1",
     symbol: "ETH",
-    rpcUrls: ["https://mainnet.base.org", "https://base-rpc.publicnode.com"],
-    explorer: "https://basescan.org",
-    dex: "uniswap",
+    rpcUrls: [
+      "https://ethereum-rpc.publicnode.com",
+      "https://cloudflare-eth.com",
+    ],
+    explorer: "https://etherscan.io",
+    writableWithMiniKit: false,
   },
   {
     name: "Optimism",
-    shortName: "OP",
     chainId: 10,
     chainHex: "0xa",
     symbol: "ETH",
-    rpcUrls: ["https://mainnet.optimism.io", "https://optimism-rpc.publicnode.com"],
+    rpcUrls: [
+      "https://mainnet.optimism.io",
+      "https://optimism-rpc.publicnode.com",
+    ],
     explorer: "https://optimistic.etherscan.io",
-    dex: "uniswap",
+    writableWithMiniKit: false,
+  },
+  {
+    name: "Base",
+    chainId: 8453,
+    chainHex: "0x2105",
+    symbol: "ETH",
+    rpcUrls: [
+      "https://mainnet.base.org",
+      "https://base-rpc.publicnode.com",
+    ],
+    explorer: "https://basescan.org",
+    writableWithMiniKit: false,
   },
   {
     name: "BNB Chain",
-    shortName: "BNB",
     chainId: 56,
     chainHex: "0x38",
     symbol: "BNB",
-    rpcUrls: ["https://bsc-dataseed.bnbchain.org", "https://bsc-rpc.publicnode.com"],
+    rpcUrls: [
+      "https://bsc-dataseed.bnbchain.org",
+      "https://bsc-rpc.publicnode.com",
+    ],
     explorer: "https://bscscan.com",
-    dex: "pancake",
+    writableWithMiniKit: false,
   },
   {
-    name: "Polygon",
-    shortName: "Polygon",
-    chainId: 137,
-    chainHex: "0x89",
-    symbol: "POL",
-    rpcUrls: ["https://polygon-bor-rpc.publicnode.com", "https://polygon-rpc.com"],
-    explorer: "https://polygonscan.com",
-    dex: "uniswap",
+    name: "World Chain Sepolia",
+    chainId: 4801,
+    chainHex: "0x12c1",
+    symbol: "ETH",
+    rpcUrls: [
+      "https://worldchain-sepolia.g.alchemy.com/public",
+    ],
+    explorer: "https://sepolia.worldscan.org",
+    writableWithMiniKit: false,
+    testnet: true,
   },
 ]);
 
 export const TOKENS = Object.freeze([
   {
-    symbol: "WLD",
-    decimals: 18,
+    symbol: "RC.PL",
+    expectedDecimals: 18,
+    projectToken: true,
     addresses: {
-      1: "0x163f8C2467924be0ae7B5347228CABF260318753",
-      10: "0xdC6fF44d5d932CBD77b52E5612Ba0529DC6226F1",
+      480: RCPL_TOKEN_ADDRESS,
+    },
+  },
+  {
+    symbol: "WLD",
+    expectedDecimals: 18,
+    addresses: {
       480: "0x2cFc85d8E48F8EAB294be644d9E25C3030863003",
+      10: "0xdC6fF44d5d932Cbd77B52E5612Ba0529DC6226F1",
+      1: "0x163f8C2467924be0ae7B5347228CABF260318753",
     },
   },
   {
     symbol: "USDC",
-    decimals: 6,
+    expectedDecimals: 6,
     addresses: {
-      1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-      10: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
       480: "0x79A02482A880bCE3F13e09Da970dC34db4CD24d1",
+      10: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
       8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      137: "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      4801: "0x66145f38cBAC35Ca6F1Dfb4914dF98F1614aeA88",
     },
   },
   {
     symbol: "USDT",
-    decimals: 6,
+    expectedDecimals: 6,
     addresses: {
-      1: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
       10: "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
-      56: "0x55d398326f99059fF775485246999027B3197955",
-      137: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-    },
-  },
-  {
-    symbol: "WETH",
-    decimals: 18,
-    addresses: {
-      1: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-      10: "0x4200000000000000000000000000000000000006",
-      480: "0x4200000000000000000000000000000000000006",
-      8453: "0x4200000000000000000000000000000000000006",
-      137: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+      1: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
     },
   },
   {
     symbol: "WBTC",
-    decimals: 8,
+    expectedDecimals: 8,
     addresses: {
-      1: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
-      480: "0x03C7054bcb39f7b2e5B2c7AcB37583e32D70Cfa3",
-      137: "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6",
+      480: "0x03C7054BCB39f7b2e5B2c7AcB37583e32D70Cfa3",
     },
   },
   {
-    symbol: "RC.PL",
-    decimals: 18,
-    projectToken: true,
+    symbol: "WETH",
+    expectedDecimals: 18,
     addresses: {
-      480: "0xb9DEe79d682f9dA8B95761036f2763cdE25bD3e8",
+      480: "0x4200000000000000000000000000000000000006",
     },
   },
   {
     symbol: "GOLD",
-    decimals: 18,
+    expectedDecimals: 18,
     addresses: {
-      480: "0x25aC3DB36BDCE12B9E4340FFb62B8dC1c0B5EF91",
+      480: "0x25aC3DB36bDCE12b9E4340ffb62B8DC1c0b5EF91",
     },
   },
   {
     symbol: "SUSHI",
-    decimals: 18,
+    expectedDecimals: 18,
     addresses: {
-      480: "0x6A1CD7b1981FDEEB8f8702b36c4b225389658E29",
+      480: "0x6A1cD7B1981FdEEb8f8702B36C4b225389658E29",
     },
   },
   {
     symbol: "MADS",
-    decimals: 18,
+    expectedDecimals: 18,
     addresses: {
-      480: "0x39FcEFD22c3407e3E4CDCD60831631FF6A1CD7b1",
+      480: "0x39fCEFD22C3407E3e4CdCD60831631Ff6A1cD7B1",
     },
   },
   {
     symbol: "RCOL",
-    decimals: 18,
+    expectedDecimals: 18,
     addresses: {
-      480: "0x78BCEFD3407e3E4CDCD60831631FF6A1CD7b25aC",
+      480: "0x78BCefd3407E3e4cdCD60831631Ff6A1CD7b25aC",
+    },
+  },
+  {
+    symbol: "CUSTOM",
+    expectedDecimals: 18,
+    addresses: {
+      480: "0xfEA3A03B06c31F863f62789d80C2b335904a9c05",
+    },
+  },
+  {
+    symbol: "CUSTOM2",
+    expectedDecimals: 18,
+    addresses: {
+      480: "0xb15e3ce3588b1B8887Cf3F4bA9FC680432478Cfe",
     },
   },
 ]);
@@ -176,10 +278,3 @@ export const SAFE_INTROSPECTION_ABI = Object.freeze([
 export const ERC1271_ABI = Object.freeze([
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)",
 ]);
-
-export const EXTERNAL_PROVIDERS = Object.freeze({
-  onramp: "https://global.transak.com",
-  offramp: "https://global.transak.com",
-  bridge: "https://app.across.to",
-  universal: "https://portal.thirdweb.com/connect/pay",
-});
