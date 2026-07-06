@@ -11,7 +11,7 @@ export default function handler(req, res) {
 
   res.setHeader(
     "Set-Cookie",
-    `rc_external_siwe_nonce=${nonce}; HttpOnly; Path=/; SameSite=Lax; Max-Age=600${secure}`,
+    `rc_siwe_nonce=${nonce}; HttpOnly; Path=/; SameSite=Lax; Max-Age=600${secure}`,
   );
   res.setHeader("Cache-Control", "no-store");
   return res.status(200).json({ nonce });
