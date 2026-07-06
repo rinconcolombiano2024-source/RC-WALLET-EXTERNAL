@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Wallet } from "ethers";
 import {
   normalizePrivateKey,
   privateKeyToAddress,
@@ -10,10 +11,16 @@ const knownAddress = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 
 assert.equal(privateKeyToAddress(knownPrivateKey), knownAddress);
 assert.equal(privateKeyToAddress(knownPrivateKey.slice(2)), knownAddress);
+assert.equal(privateKeyToAddress(` ${knownPrivateKey}\n`), new Wallet(knownPrivateKey).address);
 assert.equal(normalizePrivateKey(knownPrivateKey), knownPrivateKey);
+assert.equal(normalizePrivateKey(knownPrivateKey.replace("0x", "0X")), knownPrivateKey);
 
 assert.throws(
   () => normalizePrivateKey("0x1234"),
+  /64 caracteres hexadecimales/,
+);
+assert.throws(
+  () => normalizePrivateKey(`${knownPrivateKey.slice(0, 10)} ${knownPrivateKey.slice(10)}`),
   /64 caracteres hexadecimales/,
 );
 assert.throws(
