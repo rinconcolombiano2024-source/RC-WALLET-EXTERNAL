@@ -3,6 +3,7 @@ import { Wallet } from "ethers";
 import {
   normalizePrivateKey,
   privateKeyToAddress,
+  safeOwnersInclude,
 } from "../src/blockchain.js";
 
 const knownPrivateKey =
@@ -14,6 +15,20 @@ assert.equal(privateKeyToAddress(knownPrivateKey.slice(2)), knownAddress);
 assert.equal(privateKeyToAddress(` ${knownPrivateKey}\n`), new Wallet(knownPrivateKey).address);
 assert.equal(normalizePrivateKey(knownPrivateKey), knownPrivateKey);
 assert.equal(normalizePrivateKey(knownPrivateKey.replace("0x", "0X")), knownPrivateKey);
+assert.equal(
+  safeOwnersInclude(
+    { safe: { detected: true, owners: [knownAddress.toLowerCase()] } },
+    knownAddress,
+  ),
+  true,
+);
+assert.equal(
+  safeOwnersInclude(
+    { safe: { detected: true, owners: [knownAddress] } },
+    "0x0000000000000000000000000000000000000001",
+  ),
+  false,
+);
 
 assert.throws(
   () => normalizePrivateKey("0x1234"),
