@@ -855,11 +855,76 @@ function stopQrScannerStream(stream) {
   stream?.getTracks?.().forEach((track) => track.stop());
 }
 
+function isStandaloneApp() {
+  try {
+    return Boolean(
+      window.matchMedia?.("(display-mode: standalone)")?.matches ||
+        window.navigator?.standalone,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function getInstallDeviceInfo() {
+  const userAgent = navigator.userAgent || "";
+  const isIOS = /iPad|iPhone|iPod/.test(userAgent);
+  const isAndroid = /Android/i.test(userAgent);
+  const isDesktop = !isIOS && !isAndroid;
+
+  if (isIOS) {
+    return {
+      label: "iPhone / iPad",
+      title: "Instalar en iPhone o iPad",
+      instructions: [
+        "Abre esta pagina en Safari.",
+        "Toca Compartir.",
+        "Elige Agregar a pantalla de inicio.",
+      ],
+    };
+  }
+
+  if (isAndroid) {
+    return {
+      label: "Android",
+      title: "Instalar en Android",
+      instructions: [
+        "Toca Instalar ahora si aparece disponible.",
+        "Si no aparece, abre el menu del navegador.",
+        "Elige Instalar app o Agregar a pantalla principal.",
+      ],
+    };
+  }
+
+  if (isDesktop) {
+    return {
+      label: "Computador",
+      title: "Instalar en computador",
+      instructions: [
+        "Usa Chrome, Edge o Brave.",
+        "Toca Instalar ahora si aparece disponible.",
+        "Tambien puedes usar el icono de instalar en la barra del navegador.",
+      ],
+    };
+  }
+
+  return {
+    label: "Dispositivo",
+    title: "Instalar RC Wallet",
+    instructions: [
+      "Abre esta pagina en tu navegador principal.",
+      "Busca Instalar app o Agregar a pantalla principal.",
+      "La app quedara disponible como acceso directo instalado.",
+    ],
+  };
+}
+
 export default function App() {
   const mountedRef = useRef(false);
   const scanIdRef = useRef(0);
   const externalConnectionRef = useRef(null);
   const privateKeyRef = useRef("");
+  const installPromptRef = useRef(null);
   const autoLoginAttemptedRef = useRef(false);
   const authenticatedRef = useRef(false);
   const authenticatedWorldAddressRef = useRef("");
@@ -902,6 +967,9 @@ export default function App() {
   const [lastTransaction, setLastTransaction] = useState(null);
   const [transferHistory, setTransferHistory] = useState(readTransferHistory);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [showInstallModal, setShowInstallModal] = useState(false);
+  const [installPromptAvailable, setInstallPromptAvailable] = useState(false);
+  const [appInstalled, setAppInstalled] = useState(isStandaloneApp);
   const [proofChainId, setProofChainId] = useState(10);
   const [proofPackage, setProofPackage] = useState("");
   const [proofInput, setProofInput] = useState("");
@@ -1281,6 +1349,56 @@ export default function App() {
     if (mountedRef.current) setStatus({ message, type });
   }, []);
 
+  const installDeviceInfo = useMemo(getInstallDeviceInfo, []);
+
+  const openInstallDialog = useCallback(() => {
+    setShowInstallModal(true);
+  }, []);
+
+  const installApp = useCallback(async () => {
+    const prompt = installPromptRef.current;
+    if (!prompt) {
+      showStatus(
+        "Si no aparece instalacion directa, usa el menu del navegador y elige Agregar a pantalla principal.",
+        "info",
+      );
+      return;
+    }
+
+    try {
+      await prompt.prompt();
+      const choice = await prompt.userChoice;
+      installPromptRef.current = null;
+      setInstallPromptAvailable(false);
+
+      if (choice?.outcome === "accepted") {
+        setAppInstalled(true);
+        setShowInstallModal(false);
+        showStatus("RC Wallet quedo instalada en este dispositivo.", "success");
+      } else {
+        showStatus("Instalacion cancelada. Puedes intentarlo de nuevo.", "info");
+      }
+    } catch (error) {
+      console.error("[INSTALL APP]", error);
+      showStatus(
+        "Este navegador no permitio instalacion directa. Usa Agregar a pantalla principal.",
+        "warning",
+      );
+    }
+  }, [showStatus]);
+
+  const copyAppLink = useCallback(async () => {
+    try {
+      await copyTextToClipboard(window.location.href);
+      showStatus("Enlace de descarga copiado.", "success");
+    } catch (error) {
+      showStatus(
+        error instanceof Error ? error.message : "No se pudo copiar el enlace",
+        "error",
+      );
+    }
+  }, [showStatus]);
+
   const performWorldLogin = useCallback(
     async (contextLabel = "sesión World ID") => {
       const ready = await waitForMiniKitReady();
@@ -1400,6 +1518,29 @@ export default function App() {
       stopQrScannerStream(qrStreamRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (event) => {
+      event.preventDefault();
+      installPromptRef.current = event;
+      setInstallPromptAvailable(true);
+    };
+
+    const handleAppInstalled = () => {
+      installPromptRef.current = null;
+      setInstallPromptAvailable(false);
+      setAppInstalled(true);
+      showStatus("RC Wallet quedo instalada en este dispositivo.", "success");
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", handleAppInstalled);
+    };
+  }, [showStatus]);
 
   useEffect(() => {
     try {
@@ -1735,27 +1876,19 @@ export default function App() {
       setPrivateKeyInput("");
       setConnectedExternalAddress(address);
       setExternalConnectionName(LOCAL_PRIVATE_KEY_CONNECTION_NAME);
+      setTargetAddress(address);
+      setManualAddress(address);
+      setAuthenticatedWorldAddress("");
+      setAuthenticated(false);
+      authenticatedWorldAddressRef.current = "";
+      authenticatedRef.current = false;
 
-      if (!targetAddress) {
-        setTargetAddress(address);
-        setManualAddress(address);
-        setAuthenticatedWorldAddress("");
-        setAuthenticated(false);
-        authenticatedWorldAddressRef.current = "";
-        authenticatedRef.current = false;
-        showStatus(
-          "Llave privada local cargada en memoria. Se usara esta direccion para escanear y firmar.",
-          "success",
-        );
-        return;
-      }
-
-      const connectedMatches = safeSameAddress(address, targetAddress);
+      const connectedMatches = !targetAddress || safeSameAddress(address, targetAddress);
       showStatus(
         connectedMatches
-          ? "La llave privada local corresponde exactamente a la direccion activa."
-          : "La llave privada local genera otra direccion. No se habilitara movimiento para los fondos escaneados.",
-        connectedMatches ? "success" : "warning",
+          ? "Llave privada local cargada en memoria. Se usara esta direccion para escanear y firmar."
+          : "Llave privada local cargada. La direccion activa se actualizo a la direccion real derivada de esa llave.",
+        "success",
       );
     } catch (error) {
       privateKeyRef.current = "";
@@ -2596,16 +2729,88 @@ export default function App() {
       <div className="shell">
         <header className="hero">
           <div className="hero__mark">RC</div>
-          <div>
+          <div className="hero__copy">
             <h1>RC Wallet External</h1>
             <p>
               Detecta activos EVM y habilita movimientos únicamente cuando
               existe una firma válida para la red correspondiente.
             </p>
           </div>
+          <button
+            className="button button--install"
+            type="button"
+            onClick={openInstallDialog}
+          >
+            {appInstalled ? "App instalada" : "Descargar app"}
+          </button>
         </header>
 
         <Status status={status} />
+
+        {showInstallModal && (
+          <div className="modal-backdrop" role="presentation">
+            <section
+              className="confirm-modal install-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="install-app-title"
+            >
+              <span className="eyebrow">Descargar app</span>
+              <h2 id="install-app-title">RC Wallet para cualquier dispositivo</h2>
+              <p>
+                Instala RC Wallet External como app en este dispositivo. La
+                instalacion conserva la misma version web de Vercel y funciona
+                en movil, tablet y computador.
+              </p>
+
+              <div className="install-card">
+                <span>Dispositivo detectado</span>
+                <strong>{installDeviceInfo.label}</strong>
+                <small>
+                  {appInstalled
+                    ? "La app ya parece instalada."
+                    : installPromptAvailable
+                      ? "Instalacion directa disponible."
+                      : "Usa los pasos de instalacion del navegador."}
+                </small>
+              </div>
+
+              <div className="install-steps">
+                <strong>{installDeviceInfo.title}</strong>
+                <ol>
+                  {installDeviceInfo.instructions.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ol>
+              </div>
+
+              <div className="button-row">
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={installApp}
+                  disabled={appInstalled || !installPromptAvailable}
+                >
+                  {appInstalled ? "Ya instalada" : "Instalar ahora"}
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={copyAppLink}
+                >
+                  Copiar enlace
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() => setShowInstallModal(false)}
+                >
+                  Cerrar
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
 
         {tokenScreenOpen && selectedAsset && (
           <section className="token-screen" role="dialog" aria-modal="true">

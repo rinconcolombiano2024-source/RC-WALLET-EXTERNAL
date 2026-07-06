@@ -84,6 +84,11 @@ summary:focus-visible {
   margin: 10px 0 24px;
 }
 
+.hero__copy {
+  min-width: 0;
+  flex: 1;
+}
+
 .hero__mark {
   display: grid;
   width: 52px;
@@ -109,6 +114,17 @@ summary:focus-visible {
   color: #93a0b2;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.button--install {
+  width: auto;
+  min-width: 126px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(240, 185, 11, 0.55);
+  background: linear-gradient(145deg, #f0b90b, #d49100);
+  color: #111;
+  box-shadow: 0 12px 34px rgba(240, 185, 11, 0.2);
+  white-space: nowrap;
 }
 
 .card,
@@ -420,6 +436,61 @@ summary:focus-visible {
   color: #aeb8c5;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.install-modal {
+  display: grid;
+  gap: 12px;
+}
+
+.install-card,
+.install-steps {
+  border: 1px solid rgba(98, 169, 255, 0.22);
+  border-radius: 14px;
+  padding: 13px;
+  background: rgba(98, 169, 255, 0.055);
+}
+
+.install-card span,
+.install-card strong,
+.install-card small {
+  display: block;
+}
+
+.install-card span {
+  color: #7f8da0;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.install-card strong {
+  margin-top: 5px;
+  color: #fff;
+  font-size: 18px;
+}
+
+.install-card small {
+  margin-top: 5px;
+  color: #9fb0c4;
+  font-size: 11px;
+}
+
+.install-steps strong {
+  display: block;
+  color: #cfe6ff;
+  font-size: 13px;
+}
+
+.install-steps ol {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: #dbe7f6;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .reference-links {
@@ -2027,8 +2098,16 @@ footer {
 }
 
 @media (max-width: 520px) {
+  .hero {
+    flex-wrap: wrap;
+  }
+
   .hero h1 {
     font-size: 26px;
+  }
+
+  .button--install {
+    width: 100%;
   }
 
   .token-screen__hero h2 {

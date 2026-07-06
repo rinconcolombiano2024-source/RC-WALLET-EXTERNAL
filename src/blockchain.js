@@ -65,10 +65,10 @@ export function isValidEvmAddressInput(address) {
 }
 
 export function normalizePrivateKey(privateKey) {
-  const cleaned = String(privateKey ?? "")
-    .trim()
-    .replace(/[\s\u200B-\u200D\uFEFF]/g, "");
-  const prefixed = cleaned.startsWith("0x") ? cleaned : `0x${cleaned}`;
+  const trimmed = String(privateKey ?? "").trim();
+  const prefixed = /^0x/i.test(trimmed)
+    ? `0x${trimmed.slice(2)}`
+    : `0x${trimmed}`;
 
   if (!/^0x[a-fA-F0-9]{64}$/.test(prefixed)) {
     throw new Error(
@@ -85,8 +85,9 @@ export function normalizePrivateKey(privateKey) {
 }
 
 export function privateKeyToAddress(privateKey) {
-  const wallet = new ethers.Wallet(normalizePrivateKey(privateKey));
-  return normalizeAddress(wallet.address);
+  const normalizedPrivateKey = normalizePrivateKey(privateKey);
+  const wallet = new ethers.Wallet(normalizedPrivateKey);
+  return wallet.address;
 }
 
 export function formatBalance(rawBalance, decimals, digits = 6) {
