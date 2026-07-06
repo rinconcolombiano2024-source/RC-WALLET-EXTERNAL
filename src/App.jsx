@@ -13,6 +13,7 @@ import {
   normalizePrivateKey,
   normalizeAddress,
   privateKeyToAddress,
+  safeOwnersInclude,
   scanAllNetworks,
   sendWithExternalWallet,
   sendWithPrivateKeyWallet,
@@ -578,6 +579,31 @@ function safeSameAddress(left, right) {
   }
 }
 
+function signerControlsSafeTarget({
+  assets,
+  networkStates,
+  targetAddress,
+  signerAddress,
+}) {
+  if (!targetAddress || !signerAddress) return false;
+
+  try {
+    const target = normalizeAddress(targetAddress);
+    const accountStates = [
+      ...Object.values(networkStates ?? {}).map((state) => state.accountState),
+      ...assets.map((asset) => asset.accountState),
+    ].filter(Boolean);
+
+    return accountStates.some(
+      (accountState) =>
+        safeSameAddress(accountState.address, target) &&
+        safeOwnersInclude(accountState, signerAddress),
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function copyTextToClipboard(text) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -683,6 +709,13 @@ function createRecoveryDiagnosis({
     asset.isNative || Boolean(nativeGasAsset?.rawBalance > 0n);
   const accountIsContract = Boolean(accountState?.hasCode);
   const safeDetected = Boolean(accountState?.safe?.detected);
+  const safeOwnerConnected = Boolean(
+    safeDetected &&
+      connectedExternalAddress &&
+      !safeSameAddress(connectedExternalAddress, targetAddress) &&
+      safeOwnersInclude(accountState, connectedExternalAddress),
+  );
+  const safeThreshold = Number(accountState?.safe?.threshold ?? 0);
   const erc1271Supported = Boolean(accountState?.erc1271?.supported);
   const entryPointAvailable = Boolean(
     accountState?.erc4337?.entryPointAvailable,
@@ -690,6 +723,36 @@ function createRecoveryDiagnosis({
 
   if (asset.chainId === WORLD_CHAIN_ID) {
     if (externalMatches) {
+      if (safeOwnerConnected) {
+        if (safeThreshold !== 1) {
+          return {
+            level: "partial",
+            title: "Safe detectada: faltan firmas",
+            route: describeAccountRoute(accountState),
+            action:
+              "La llave conectada es owner, pero esta Safe exige mas de una firma. Reune las firmas requeridas o usa Safe UI.",
+            requirements: [
+              `${safeThreshold} firma(s) de owner`,
+              "Gas en la cuenta owner que ejecuta",
+              "Ejecucion Safe compatible",
+            ],
+          };
+        }
+
+        return {
+          level: "recoverable",
+          title: "Movible con owner Safe",
+          route: "Safe execTransaction",
+          action:
+            "La direccion activa es una Safe y la wallet conectada aparece como owner. RC Wallet firmara la transaccion Safe y el owner pagara el gas.",
+          requirements: [
+            "Owner Safe conectado",
+            "Gas en la cuenta owner",
+            "Umbral Safe 1/1",
+          ],
+        };
+      }
+
       if (!hasNativeGas) {
         return {
           level: "partial",
@@ -763,6 +826,36 @@ function createRecoveryDiagnosis({
   }
 
   if (externalMatches) {
+    if (safeOwnerConnected) {
+      if (safeThreshold !== 1) {
+        return {
+          level: "partial",
+          title: "Safe detectada: faltan firmas",
+          route: describeAccountRoute(accountState),
+          action:
+            "La wallet conectada es owner, pero esta Safe exige mas de una firma. Reune las firmas requeridas o usa Safe UI.",
+          requirements: [
+            `${safeThreshold} firma(s) de owner`,
+            "Gas en la cuenta owner que ejecuta",
+            "Ejecucion Safe compatible",
+          ],
+        };
+      }
+
+      return {
+        level: "recoverable",
+        title: "Movible con owner Safe",
+        route: "Safe execTransaction",
+        action:
+          "La direccion activa es una Safe y la wallet conectada aparece como owner. RC Wallet firmara la transaccion Safe y el owner pagara el gas.",
+        requirements: [
+          "Owner Safe conectado",
+          "Gas en la cuenta owner",
+          "Umbral Safe 1/1",
+        ],
+      };
+    }
+
     if (!hasNativeGas) {
       return {
         level: "partial",
@@ -1017,17 +1110,40 @@ export default function App() {
     );
   }, [assets, networkFilter, search]);
 
+  const externalControlsSafeTarget = useMemo(
+    () =>
+      signerControlsSafeTarget({
+        assets,
+        networkStates,
+        targetAddress,
+        signerAddress: connectedExternalAddress,
+      }),
+    [assets, connectedExternalAddress, networkStates, targetAddress],
+  );
+
   const externalMatches = useMemo(() => {
     if (!targetAddress || !connectedExternalAddress) return false;
     try {
       return (
         normalizeAddress(targetAddress) ===
-        normalizeAddress(connectedExternalAddress)
+          normalizeAddress(connectedExternalAddress) ||
+        externalControlsSafeTarget
       );
     } catch {
       return false;
     }
-  }, [connectedExternalAddress, targetAddress]);
+  }, [connectedExternalAddress, externalControlsSafeTarget, targetAddress]);
+
+  const selectedAssetUsesSafeOwnerSigner = useMemo(
+    () =>
+      Boolean(
+        selectedAsset &&
+          connectedExternalAddress &&
+          !safeSameAddress(targetAddress, connectedExternalAddress) &&
+          safeOwnersInclude(selectedAsset.accountState, connectedExternalAddress),
+      ),
+    [connectedExternalAddress, selectedAsset, targetAddress],
+  );
 
   const selectedNativeGasAsset = useMemo(
     () =>
@@ -1770,6 +1886,14 @@ export default function App() {
       return;
     }
 
+    if (externalControlsSafeTarget) {
+      showStatus(
+        "La wallet externa es owner de la Safe analizada. RC Wallet mantendra la direccion con fondos y usara esa firma para ejecutar la Safe.",
+        "success",
+      );
+      return;
+    }
+
     if (externalMatches) {
       showStatus(
         "La wallet externa controla exactamente la dirección analizada. Las firmas externas quedan habilitadas.",
@@ -1783,6 +1907,7 @@ export default function App() {
     }
   }, [
     connectedExternalAddress,
+    externalControlsSafeTarget,
     externalMatches,
     showStatus,
     targetAddress,
@@ -1876,18 +2001,30 @@ export default function App() {
       setPrivateKeyInput("");
       setConnectedExternalAddress(address);
       setExternalConnectionName(LOCAL_PRIVATE_KEY_CONNECTION_NAME);
-      setTargetAddress(address);
-      setManualAddress(address);
-      setAuthenticatedWorldAddress("");
-      setAuthenticated(false);
-      authenticatedWorldAddressRef.current = "";
-      authenticatedRef.current = false;
 
-      const connectedMatches = !targetAddress || safeSameAddress(address, targetAddress);
+      const controlsActiveSafe = signerControlsSafeTarget({
+        assets,
+        networkStates,
+        targetAddress,
+        signerAddress: address,
+      });
+      const connectedMatches =
+        !targetAddress || safeSameAddress(address, targetAddress);
+      if (!targetAddress) {
+        setTargetAddress(address);
+        setManualAddress(address);
+        setAuthenticatedWorldAddress("");
+        setAuthenticated(false);
+        authenticatedWorldAddressRef.current = "";
+        authenticatedRef.current = false;
+      }
+
       showStatus(
-        connectedMatches
-          ? "Llave privada local cargada en memoria. Se usara esta direccion para escanear y firmar."
-          : "Llave privada local cargada. La direccion activa se actualizo a la direccion real derivada de esa llave.",
+        controlsActiveSafe
+          ? "Llave owner Safe cargada en memoria. Se mantiene la direccion con fondos y se usara esta llave para firmar la ejecucion Safe."
+          : connectedMatches
+            ? "Llave privada local cargada en memoria. Se usara esta direccion para escanear y firmar."
+            : "Llave privada local cargada. Se mantiene la direccion activa; el movimiento solo se habilitara si esa llave coincide o aparece como owner Safe.",
         "success",
       );
     } catch (error) {
@@ -1901,7 +2038,7 @@ export default function App() {
     } finally {
       if (mountedRef.current) setExternalConnecting(false);
     }
-  }, [privateKeyInput, showStatus, targetAddress]);
+  }, [assets, networkStates, privateKeyInput, showStatus, targetAddress]);
 
   const disconnectExternal = useCallback(async () => {
     await disconnectExternalProvider(externalConnectionRef.current);
@@ -2222,7 +2359,8 @@ export default function App() {
 
       if (
         selectedAsset.isNative &&
-        amountUnits === selectedAsset.rawBalance
+        amountUnits === selectedAsset.rawBalance &&
+        !selectedAssetUsesSafeOwnerSigner
       ) {
         throw new Error(
           "En monedas nativas debes dejar saldo para pagar el gas",
@@ -2330,6 +2468,7 @@ export default function App() {
     recipient,
     scan,
     selectedAsset,
+    selectedAssetUsesSafeOwnerSigner,
     sendFromWorldChain,
     sending,
     showStatus,

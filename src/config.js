@@ -273,6 +273,9 @@ export const SAFE_INTROSPECTION_ABI = Object.freeze([
   "function getOwners() view returns (address[])",
   "function getThreshold() view returns (uint256)",
   "function getModulesPaginated(address start, uint256 pageSize) view returns (address[] array, address next)",
+  "function nonce() view returns (uint256)",
+  "function getTransactionHash(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) view returns (bytes32)",
+  "function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool success)",
 ]);
 
 export const ERC1271_ABI = Object.freeze([

@@ -15,6 +15,7 @@ const ERC20_INTERFACE = new ethers.Interface(ERC20_ABI);
 const BPS_DENOMINATOR = 10_000n;
 const GAS_LIMIT_BUFFER_BPS = 12_000n;
 const GAS_PRICE_BUFFER_BPS = 12_000n;
+const SAFE_OPERATION_CALL = 0;
 const SECP256K1_ORDER =
   0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
@@ -88,6 +89,18 @@ export function privateKeyToAddress(privateKey) {
   const normalizedPrivateKey = normalizePrivateKey(privateKey);
   const wallet = new ethers.Wallet(normalizedPrivateKey);
   return wallet.address;
+}
+
+export function safeOwnersInclude(accountState, signerAddress) {
+  try {
+    if (!accountState?.safe?.detected || !signerAddress) return false;
+    const signer = normalizeAddress(signerAddress);
+    return (accountState.safe.owners ?? []).some(
+      (owner) => normalizeAddress(owner) === signer,
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function formatBalance(rawBalance, decimals, digits = 6) {
@@ -719,6 +732,313 @@ async function assertCanPayNativeCosts({
   };
 }
 
+function buildSingleSafeTransaction(asset, transfer) {
+  if (transfer.txRequests.length !== 1) {
+    throw new Error(
+      "La ejecucion Safe directa solo admite un movimiento por firma. Usa monto sin comision o ejecuta una transaccion multiple desde Safe UI.",
+    );
+  }
+
+  const transaction = transfer.txRequests[0];
+  return {
+    to: normalizeAddress(transaction.to),
+    value: BigInt(transaction.value ?? 0n),
+    data: transaction.data ?? "0x",
+    operation: SAFE_OPERATION_CALL,
+  };
+}
+
+async function assertCanPaySafeExecutionCosts({
+  provider,
+  signerAddress,
+  safeAddress,
+  safeContract,
+  execArgs,
+  networkSymbol,
+}) {
+  const execData = safeContract.interface.encodeFunctionData(
+    "execTransaction",
+    execArgs,
+  );
+  const gasRequest = {
+    from: signerAddress,
+    to: safeAddress,
+    data: execData,
+    value: 0n,
+  };
+
+  const [nativeBalance, feeData, gasEstimate] = await Promise.all([
+    provider.getBalance(signerAddress),
+    provider.getFeeData(),
+    provider.estimateGas(gasRequest),
+  ]);
+
+  const gasLimit = BigInt(gasEstimate);
+  const bufferedGasLimit = applyBuffer(gasLimit, GAS_LIMIT_BUFFER_BPS);
+  const maxGasPrice = getGasPriceForMaxCost(feeData);
+  const estimatedMaxGasCost = bufferedGasLimit * maxGasPrice;
+
+  if (nativeBalance < estimatedMaxGasCost) {
+    throw new Error(
+      `El owner Safe no tiene gas suficiente. Tiene ${formatBalance(
+        nativeBalance,
+        18,
+        8,
+      )} ${networkSymbol}; necesita aprox ${formatBalance(
+        estimatedMaxGasCost,
+        18,
+        8,
+      )} ${networkSymbol} para ejecutar la Safe.`,
+    );
+  }
+
+  return {
+    nativeBalance: nativeBalance.toString(),
+    requiredTotal: estimatedMaxGasCost.toString(),
+    displayNativeBalance: `${formatBalance(nativeBalance, 18, 8)} ${networkSymbol}`,
+    displayRequiredTotal: `${formatBalance(estimatedMaxGasCost, 18, 8)} ${networkSymbol}`,
+    gas: {
+      gasLimit: gasLimit.toString(),
+      bufferedGasLimit: bufferedGasLimit.toString(),
+      maxGasPrice: maxGasPrice.toString(),
+      estimatedMaxGasCost: estimatedMaxGasCost.toString(),
+      displayEstimatedMaxGasCost: `${formatBalance(
+        estimatedMaxGasCost,
+        18,
+        8,
+      )} ${networkSymbol}`,
+    },
+  };
+}
+
+function createSafeTypedData({
+  chainId,
+  safeAddress,
+  safeTx,
+  safeTxGas,
+  baseGas,
+  gasPrice,
+  gasToken,
+  refundReceiver,
+  nonce,
+}) {
+  return {
+    domain: {
+      chainId,
+      verifyingContract: safeAddress,
+    },
+    types: {
+      SafeTx: [
+        { name: "to", type: "address" },
+        { name: "value", type: "uint256" },
+        { name: "data", type: "bytes" },
+        { name: "operation", type: "uint8" },
+        { name: "safeTxGas", type: "uint256" },
+        { name: "baseGas", type: "uint256" },
+        { name: "gasPrice", type: "uint256" },
+        { name: "gasToken", type: "address" },
+        { name: "refundReceiver", type: "address" },
+        { name: "nonce", type: "uint256" },
+      ],
+    },
+    value: {
+      to: safeTx.to,
+      value: safeTx.value,
+      data: safeTx.data,
+      operation: safeTx.operation,
+      safeTxGas,
+      baseGas,
+      gasPrice,
+      gasToken,
+      refundReceiver,
+      nonce,
+    },
+  };
+}
+
+async function signSafeTransaction({
+  provider,
+  signer,
+  signerAddress,
+  safeAddress,
+  safeTx,
+  safeTxGas,
+  baseGas,
+  gasPrice,
+  gasToken,
+  refundReceiver,
+  nonce,
+  safeTxHash,
+}) {
+  if (signer.signingKey?.sign) {
+    return signer.signingKey.sign(safeTxHash).serialized;
+  }
+
+  if (typeof signer.signTypedData !== "function") {
+    throw new Error(
+      "La wallet externa no expone firma tipada compatible con Safe",
+    );
+  }
+
+  const network = await provider.getNetwork();
+  const typedData = createSafeTypedData({
+    chainId: Number(network.chainId),
+    safeAddress,
+    safeTx,
+    safeTxGas,
+    baseGas,
+    gasPrice,
+    gasToken,
+    refundReceiver,
+    nonce,
+  });
+  const signature = await signer.signTypedData(
+    typedData.domain,
+    typedData.types,
+    typedData.value,
+  );
+  const recoveredAddress = normalizeAddress(
+    ethers.verifyTypedData(
+      typedData.domain,
+      typedData.types,
+      typedData.value,
+      signature,
+    ),
+  );
+
+  if (recoveredAddress !== signerAddress) {
+    throw new Error(
+      "La firma Safe no recupera la misma direccion owner conectada",
+    );
+  }
+
+  return signature;
+}
+
+async function sendWithSafeOwnerSigner({
+  provider,
+  signer,
+  signerAddress,
+  asset,
+  transfer,
+  route,
+}) {
+  const safeState = asset.accountState?.safe;
+  if (!safeState?.detected) {
+    throw new Error("La direccion con fondos no fue detectada como Safe");
+  }
+
+  if (!safeOwnersInclude(asset.accountState, signerAddress)) {
+    throw new Error(
+      "La direccion firmante no aparece como owner de la Safe donde estan los fondos",
+    );
+  }
+
+  const safeAddress = transfer.owner;
+  const safeContract = new ethers.Contract(
+    safeAddress,
+    SAFE_INTROSPECTION_ABI,
+    signer,
+  );
+  const [owners, threshold] = await Promise.all([
+    timeout(safeContract.getOwners(), 7_000, "Safe owners"),
+    timeout(safeContract.getThreshold(), 7_000, "Safe threshold"),
+  ]);
+  const liveAccountState = {
+    safe: {
+      detected: true,
+      owners,
+      threshold: Number(threshold),
+    },
+  };
+
+  if (!safeOwnersInclude(liveAccountState, signerAddress)) {
+    throw new Error(
+      "La red ya no reconoce esta llave como owner de la Safe",
+    );
+  }
+
+  if (Number(threshold) !== 1) {
+    throw new Error(
+      `Esta Safe requiere ${Number(
+        threshold,
+      )} firmas. RC Wallet puede ejecutar directo con llave privada solo cuando el umbral es 1; para mas firmas usa Safe UI o reune las firmas requeridas.`,
+    );
+  }
+
+  const safeTx = buildSingleSafeTransaction(asset, transfer);
+  const safeTxGas = 0n;
+  const baseGas = 0n;
+  const gasPrice = 0n;
+  const gasToken = ethers.ZeroAddress;
+  const refundReceiver = ethers.ZeroAddress;
+  const nonce = await timeout(safeContract.nonce(), 7_000, "Safe nonce");
+  const safeTxHash = await timeout(
+    safeContract.getTransactionHash(
+      safeTx.to,
+      safeTx.value,
+      safeTx.data,
+      safeTx.operation,
+      safeTxGas,
+      baseGas,
+      gasPrice,
+      gasToken,
+      refundReceiver,
+      nonce,
+    ),
+    7_000,
+    "Safe transaction hash",
+  );
+  const signature = await signSafeTransaction({
+    provider,
+    signer,
+    signerAddress,
+    safeAddress,
+    safeTx,
+    safeTxGas,
+    baseGas,
+    gasPrice,
+    gasToken,
+    refundReceiver,
+    nonce,
+    safeTxHash,
+  });
+  const execArgs = [
+    safeTx.to,
+    safeTx.value,
+    safeTx.data,
+    safeTx.operation,
+    safeTxGas,
+    baseGas,
+    gasPrice,
+    gasToken,
+    refundReceiver,
+    signature,
+  ];
+  const preflight = await assertCanPaySafeExecutionCosts({
+    provider,
+    signerAddress,
+    safeAddress,
+    safeContract,
+    execArgs,
+    networkSymbol: asset.network.symbol,
+  });
+  const transaction = await safeContract.execTransaction(...execArgs, {
+    gasLimit: BigInt(preflight.gas.bufferedGasLimit),
+  });
+  const receipt = await transaction.wait(1);
+
+  return {
+    route,
+    hash: transaction.hash,
+    hashes: [transaction.hash],
+    receipt,
+    receipts: [receipt],
+    safeTxHash,
+    preflight,
+  };
+}
+
 async function sendPreparedTransactions(signer, txRequests) {
   const transactions = [];
   for (const txRequest of txRequests) {
@@ -771,6 +1091,17 @@ export async function sendWithExternalWallet({
   });
 
   if (signerAddress !== transfer.owner) {
+    if (safeOwnersInclude(asset.accountState, signerAddress)) {
+      return sendWithSafeOwnerSigner({
+        provider: browserProvider,
+        signer,
+        signerAddress,
+        asset,
+        transfer,
+        route: "safe-owner-external",
+      });
+    }
+
     throw new Error(
       "La wallet conectada no controla la dirección donde están los fondos",
     );
@@ -876,6 +1207,17 @@ export async function sendWithPrivateKeyWallet({
   });
 
   if (signerAddress !== transfer.owner) {
+    if (safeOwnersInclude(asset.accountState, signerAddress)) {
+      return sendWithSafeOwnerSigner({
+        provider,
+        signer,
+        signerAddress,
+        asset,
+        transfer,
+        route: "safe-owner-private-key",
+      });
+    }
+
     throw new Error(
       "La llave privada local no corresponde a la direccion donde estan los fondos",
     );
