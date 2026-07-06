@@ -11,6 +11,12 @@ import {
 const providerCache = new Map();
 const ERC1271_MAGIC_VALUE = "0x1626ba7e";
 const SAFE_SENTINEL = "0x0000000000000000000000000000000000000001";
+const ERC20_INTERFACE = new ethers.Interface(ERC20_ABI);
+const BPS_DENOMINATOR = 10_000n;
+const GAS_LIMIT_BUFFER_BPS = 12_000n;
+const GAS_PRICE_BUFFER_BPS = 12_000n;
+const SECP256K1_ORDER =
+  0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 function timeout(promise, milliseconds, label) {
   let timeoutId;
@@ -68,6 +74,11 @@ export function normalizePrivateKey(privateKey) {
     throw new Error(
       "La llave privada debe tener 64 caracteres hexadecimales",
     );
+  }
+
+  const value = BigInt(prefixed);
+  if (value <= 0n || value >= SECP256K1_ORDER) {
+    throw new Error("La llave privada no esta dentro del rango EVM valido");
   }
 
   return prefixed;
@@ -522,6 +533,210 @@ export async function switchExternalNetwork(provider, network) {
   }
 }
 
+function applyBuffer(value, bps) {
+  return (value * bps + BPS_DENOMINATOR - 1n) / BPS_DENOMINATOR;
+}
+
+function getGasPriceForMaxCost(feeData) {
+  const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice;
+  if (!gasPrice || gasPrice <= 0n) {
+    throw new Error("La red no devolvio precio de gas valido");
+  }
+
+  return applyBuffer(BigInt(gasPrice), GAS_PRICE_BUFFER_BPS);
+}
+
+function prepareTransfer({
+  asset,
+  targetAddress,
+  recipient,
+  amount,
+  feeRecipient,
+  feeAmountUnits = 0n,
+}) {
+  const owner = normalizeAddress(targetAddress);
+  const destination = normalizeAddress(recipient);
+  if (owner === destination) {
+    throw new Error("La direccion de destino es igual a la direccion origen");
+  }
+
+  const amountUnits = ethers.parseUnits(amount, asset.decimals);
+  if (amountUnits <= 0n) {
+    throw new Error("La cantidad debe ser mayor que cero");
+  }
+  if (amountUnits > asset.rawBalance) {
+    throw new Error("La cantidad supera el balance detectado");
+  }
+
+  const feeUnits = BigInt(feeAmountUnits);
+  if (feeUnits < 0n || feeUnits >= amountUnits) {
+    throw new Error("La comision calculada no es valida");
+  }
+
+  if (feeUnits > 0n && !feeRecipient) {
+    throw new Error("Falta la direccion que recibe la comision");
+  }
+
+  const recipientAmountUnits = amountUnits - feeUnits;
+  if (recipientAmountUnits <= 0n) {
+    throw new Error("El monto neto para el usuario debe ser mayor que cero");
+  }
+
+  const normalizedFeeRecipient =
+    feeUnits > 0n && feeRecipient ? normalizeAddress(feeRecipient) : null;
+  const txRequests = [];
+
+  if (asset.isNative) {
+    txRequests.push({
+      to: destination,
+      value: recipientAmountUnits,
+    });
+
+    if (normalizedFeeRecipient) {
+      txRequests.push({
+        to: normalizedFeeRecipient,
+        value: feeUnits,
+      });
+    }
+  } else {
+    const tokenAddress = normalizeAddress(asset.address);
+    txRequests.push({
+      to: tokenAddress,
+      data: ERC20_INTERFACE.encodeFunctionData("transfer", [
+        destination,
+        recipientAmountUnits,
+      ]),
+      value: 0n,
+    });
+
+    if (normalizedFeeRecipient) {
+      txRequests.push({
+        to: tokenAddress,
+        data: ERC20_INTERFACE.encodeFunctionData("transfer", [
+          normalizedFeeRecipient,
+          feeUnits,
+        ]),
+        value: 0n,
+      });
+    }
+  }
+
+  return {
+    owner,
+    destination,
+    amountUnits,
+    feeUnits,
+    recipientAmountUnits,
+    requiredNativeValue: asset.isNative ? amountUnits : 0n,
+    txRequests,
+  };
+}
+
+async function estimateGasCost(provider, signer, txRequests, networkSymbol) {
+  const [feeData, gasResults] = await Promise.all([
+    provider.getFeeData(),
+    Promise.allSettled(
+      txRequests.map((transaction) => signer.estimateGas(transaction)),
+    ),
+  ]);
+
+  let gasLimit = 0n;
+  for (const result of gasResults) {
+    if (result.status !== "fulfilled") {
+      const message =
+        result.reason instanceof Error
+          ? result.reason.message
+          : "La simulacion de gas fallo";
+      throw new Error(
+        `La red rechazo la simulacion antes de firmar: ${message}`,
+      );
+    }
+    gasLimit += BigInt(result.value);
+  }
+
+  const bufferedGasLimit = applyBuffer(gasLimit, GAS_LIMIT_BUFFER_BPS);
+  const maxGasPrice = getGasPriceForMaxCost(feeData);
+  const estimatedMaxGasCost = bufferedGasLimit * maxGasPrice;
+
+  return {
+    gasLimit,
+    bufferedGasLimit,
+    maxGasPrice,
+    estimatedMaxGasCost,
+    displayEstimatedMaxGasCost: `${formatBalance(
+      estimatedMaxGasCost,
+      18,
+      8,
+    )} ${networkSymbol}`,
+  };
+}
+
+async function assertCanPayNativeCosts({
+  provider,
+  signer,
+  owner,
+  asset,
+  txRequests,
+  requiredNativeValue,
+}) {
+  const [nativeBalance, gas] = await Promise.all([
+    provider.getBalance(owner),
+    estimateGasCost(provider, signer, txRequests, asset.network.symbol),
+  ]);
+  const requiredTotal = requiredNativeValue + gas.estimatedMaxGasCost;
+
+  if (nativeBalance < requiredTotal) {
+    throw new Error(
+      `Saldo insuficiente para pagar gas en ${asset.networkName}. Tienes ${formatBalance(
+        nativeBalance,
+        18,
+        8,
+      )} ${asset.network.symbol}; necesitas aprox ${formatBalance(
+        requiredTotal,
+        18,
+        8,
+      )} ${asset.network.symbol} incluyendo gas.`,
+    );
+  }
+
+  return {
+    nativeBalance: nativeBalance.toString(),
+    requiredTotal: requiredTotal.toString(),
+    displayNativeBalance: `${formatBalance(nativeBalance, 18, 8)} ${
+      asset.network.symbol
+    }`,
+    displayRequiredTotal: `${formatBalance(requiredTotal, 18, 8)} ${
+      asset.network.symbol
+    }`,
+    gas: {
+      gasLimit: gas.gasLimit.toString(),
+      bufferedGasLimit: gas.bufferedGasLimit.toString(),
+      maxGasPrice: gas.maxGasPrice.toString(),
+      estimatedMaxGasCost: gas.estimatedMaxGasCost.toString(),
+      displayEstimatedMaxGasCost: gas.displayEstimatedMaxGasCost,
+    },
+  };
+}
+
+async function sendPreparedTransactions(signer, txRequests) {
+  const transactions = [];
+  for (const txRequest of txRequests) {
+    transactions.push(await signer.sendTransaction(txRequest));
+  }
+
+  const receipts = [];
+  for (const transaction of transactions) {
+    receipts.push(await transaction.wait(1));
+  }
+
+  return {
+    hash: transactions[0]?.hash ?? null,
+    hashes: transactions.map((transaction) => transaction.hash),
+    receipt: receipts[0] ?? null,
+    receipts,
+  };
+}
+
 export async function sendWithExternalWallet({
   provider,
   asset,
@@ -545,8 +760,16 @@ export async function sendWithExternalWallet({
   const browserProvider = new ethers.BrowserProvider(provider);
   const signer = await browserProvider.getSigner();
   const signerAddress = normalizeAddress(await signer.getAddress());
+  const transfer = prepareTransfer({
+    asset,
+    targetAddress,
+    recipient,
+    amount,
+    feeRecipient,
+    feeAmountUnits,
+  });
 
-  if (signerAddress !== owner) {
+  if (signerAddress !== transfer.owner) {
     throw new Error(
       "La wallet conectada no controla la dirección donde están los fondos",
     );
@@ -569,6 +792,14 @@ export async function sendWithExternalWallet({
   }
   const normalizedFeeRecipient =
     feeUnits > 0n && feeRecipient ? normalizeAddress(feeRecipient) : null;
+  const preflight = await assertCanPayNativeCosts({
+    provider: browserProvider,
+    signer,
+    owner: transfer.owner,
+    asset,
+    txRequests: transfer.txRequests,
+    requiredNativeValue: transfer.requiredNativeValue,
+  });
 
   const transactions = [];
   if (asset.isNative) {
@@ -612,6 +843,7 @@ export async function sendWithExternalWallet({
     hashes: transactions.map((transaction) => transaction.hash),
     receipt: receipts[0] ?? null,
     receipts,
+    preflight,
   };
 }
 
@@ -633,8 +865,16 @@ export async function sendWithPrivateKeyWallet({
   const provider = await getProvider(asset.network);
   const signer = new ethers.Wallet(normalizePrivateKey(privateKey), provider);
   const signerAddress = normalizeAddress(signer.address);
+  const transfer = prepareTransfer({
+    asset,
+    targetAddress,
+    recipient,
+    amount,
+    feeRecipient,
+    feeAmountUnits,
+  });
 
-  if (signerAddress !== owner) {
+  if (signerAddress !== transfer.owner) {
     throw new Error(
       "La llave privada local no corresponde a la direccion donde estan los fondos",
     );
@@ -657,6 +897,14 @@ export async function sendWithPrivateKeyWallet({
   }
   const normalizedFeeRecipient =
     feeUnits > 0n && feeRecipient ? normalizeAddress(feeRecipient) : null;
+  const preflight = await assertCanPayNativeCosts({
+    provider,
+    signer,
+    owner: transfer.owner,
+    asset,
+    txRequests: transfer.txRequests,
+    requiredNativeValue: transfer.requiredNativeValue,
+  });
 
   const transactions = [];
   if (asset.isNative) {
@@ -700,5 +948,6 @@ export async function sendWithPrivateKeyWallet({
     hashes: transactions.map((transaction) => transaction.hash),
     receipt: receipts[0] ?? null,
     receipts,
+    preflight,
   };
 }

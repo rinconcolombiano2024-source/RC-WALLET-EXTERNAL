@@ -59,6 +59,9 @@ const TRANSFER_HISTORY_KEY = "rc_wallet_transfer_history_v1";
 const DEFAULT_RCPL_TARGET_PRICE = "0.10";
 const DEFAULT_RCPL_LIQUIDITY_USD = "1000";
 const LOCAL_PRIVATE_KEY_CONNECTION_NAME = "Llave privada local";
+const WORLD_MINI_APP_URL =
+  import.meta.env.VITE_WORLD_MINI_APP_URL?.trim() ||
+  "https://worldcoin.org/mini-app?app_id=app_f4a98191ddc786151b045abc9fcef81b&app_mode=mini-app";
 const WORLD_ID_STATEMENT = "Iniciar sesión en RC Wallet Recovery";
 
 const APP_TABS = Object.freeze([
@@ -429,18 +432,21 @@ function createBridgePlan({
   const worldSessionReady = Boolean(
     authenticated && safeSameAddress(authenticatedWorldAddress, targetAddress),
   );
-  const signerReady = sourceIsWorldChain ? worldSessionReady : externalMatches;
-  const signerRequirement = sourceIsWorldChain
-    ? "Firma World App / MiniKit en World Chain"
-    : "Wallet externa que controle exactamente la misma dirección origen";
-  const signerStatus = sourceIsWorldChain
-    ? worldSessionReady
-      ? "Sesión World App coincide con la dirección origen"
-      : "Falta iniciar sesión World App con la dirección origen"
-    : externalMatches
-      ? "Wallet externa coincidente conectada"
+  const signerReady =
+    externalMatches || (sourceIsWorldChain ? worldSessionReady : false);
+  const signerRequirement = externalMatches
+    ? "Wallet externa o llave local que controle exactamente la direccion origen"
+    : sourceIsWorldChain
+      ? "Firma World App / MiniKit en World Chain"
+      : "Wallet externa que controle exactamente la misma direccion origen";
+  const signerStatus = externalMatches
+    ? "Wallet externa o llave local coincidente conectada"
+    : sourceIsWorldChain
+      ? worldSessionReady
+        ? "Sesion World App coincide con la direccion origen"
+        : "Falta sesion World App o una firma externa con la direccion origen"
       : connectedExternalAddress
-        ? "Wallet externa conectada, pero no coincide con la dirección origen"
+        ? "Wallet externa conectada, pero no coincide con la direccion origen"
         : "Falta conectar wallet externa firmante";
 
   return {
@@ -545,6 +551,9 @@ function Status({ status }) {
 }
 
 function RecoveryBadge({ asset, externalMatches }) {
+  if (externalMatches) {
+    return <span className="badge badge--green">Firma externa disponible</span>;
+  }
   if (asset.chainId === WORLD_CHAIN_ID) {
     return <span className="badge badge--green">Firma World App</span>;
   }
@@ -680,6 +689,50 @@ function createRecoveryDiagnosis({
   );
 
   if (asset.chainId === WORLD_CHAIN_ID) {
+    if (externalMatches) {
+      if (!hasNativeGas) {
+        return {
+          level: "partial",
+          title: "Movible, falta gas",
+          route: "Firma externa en World Chain",
+          action: `La wallet externa coincide, pero necesitas ${asset.network.symbol} en la misma direccion para pagar gas en World Chain.`,
+          requirements: [
+            `Enviar ${asset.network.symbol} a la misma direccion`,
+            "Mantener MetaMask, WalletConnect o llave local conectada",
+          ],
+        };
+      }
+
+      if (safeDetected) {
+        return {
+          level: "partial",
+          title: "Smart wallet detectada: requiere ejecucion compatible",
+          route: describeAccountRoute(accountState),
+          action:
+            "La direccion en World Chain tiene bytecode. Solo funcionara si el firmante externo puede ejecutar desde esa smart account exacta.",
+          requirements: [
+            "Proveedor capaz de ejecutar la smart account",
+            "Gas disponible en World Chain",
+          ],
+        };
+      }
+
+      return {
+        level: accountIsContract ? "partial" : "recoverable",
+        title: accountIsContract
+          ? "Posible con smart wallet compatible"
+          : "Movible con firma externa",
+        route: "Llave privada local / MetaMask en World Chain",
+        action:
+          "Completa destino y monto. RC Wallet External firmara en World Chain con la llave local, MetaMask o WalletConnect desde la misma direccion.",
+        requirements: [
+          "Misma direccion origen",
+          "Gas ETH en World Chain",
+          "Confirmacion manual",
+        ],
+      };
+    }
+
     if (authenticated && miniKitReady && worldSessionMatches) {
       return {
         level: "recoverable",
@@ -697,13 +750,14 @@ function createRecoveryDiagnosis({
 
     return {
       level: "partial",
-      title: "⚠️ Movible, falta sesión World App",
-      route: "Autenticación World App",
+      title: "Movible, falta firma exacta",
+      route: "World App o wallet externa exacta",
       action:
-        "Pulsa “Autenticar con World App” con la misma cuenta que contiene los fondos. RC Wallet no moverá nada si la sesión no coincide.",
+        "Conecta MetaMask, WalletConnect o una llave privada local que abra la misma direccion. Tambien puedes abrir la Mini App en World App y autenticar esa misma cuenta.",
       requirements: [
-        "Abrir dentro de World App",
-        "Firmar SIWE con la misma dirección",
+        "Misma direccion origen",
+        "Gas ETH en World Chain",
+        "Firma externa o sesion World App coincidente",
       ],
     };
   }
@@ -865,7 +919,7 @@ export default function App() {
   const [status, setStatus] = useState({
     type: "info",
     message:
-      "Conecta World App o introduce una dirección para iniciar el diagnóstico.",
+      "Abre una direccion con llave privada local, conecta una wallet externa o analiza una direccion EVM.",
   });
 
   const selectedAsset = useMemo(
@@ -1114,7 +1168,7 @@ export default function App() {
             : "needs-action",
         title: "Wallet externa firmante",
         description:
-          "Ruta para Ethereum, Optimism, Base y BNB cuando MetaMask, Trust, Binance Wallet o WalletConnect firman desde la misma dirección.",
+          "Ruta para World Chain, Ethereum, Optimism, Base y BNB cuando MetaMask, Trust, Binance Wallet, WalletConnect o una llave local firman desde la misma direccion.",
         next: externalMatches
           ? RECOVERY_FEE_BPS > 0n
             ? "Completa destino, monto y acepta comisión para abrir firma externa."
@@ -2046,7 +2100,7 @@ export default function App() {
       setLastTransaction(null);
 
       let result;
-      if (selectedAsset.chainId === WORLD_CHAIN_ID) {
+      if (selectedAsset.chainId === WORLD_CHAIN_ID && !externalMatches) {
         result = await sendFromWorldChain(
           selectedAsset,
           destination,
@@ -2100,7 +2154,12 @@ export default function App() {
       }
 
       const transactionRecord = {
-        ...result,
+        route: result.route,
+        hash: result.hash ?? null,
+        hashes: result.hashes ?? (result.hash ? [result.hash] : []),
+        userOpHash: result.userOpHash ?? null,
+        pending: Boolean(result.pending),
+        preflight: result.preflight ?? null,
         network: selectedAsset.network,
         token: selectedAsset.symbol,
         amount: cleanAmount,
@@ -2369,13 +2428,13 @@ export default function App() {
         return;
       }
 
-      const needsExternalSigner = selectedAsset.chainId !== WORLD_CHAIN_ID;
+      const bridgeSignerReady = selectedBridgePlan.status === "ready";
       const signerWarning =
-        needsExternalSigner && !externalMatches
-          ? "Atención: el bridge se abrirá, pero no podrá mover fondos hasta conectar una wallet que firme exactamente la dirección origen."
+        !bridgeSignerReady
+          ? "Atencion: el bridge se abrira, pero no podra mover fondos hasta conectar una firma valida de la direccion origen y tener gas."
           : `Abriendo ${provider.name}. Revisa origen ${selectedAsset.networkName}, destino ${bridgeDestinationNetwork.name}, token ${selectedAsset.symbol} y firma solo si todo coincide.`;
 
-      showStatus(signerWarning, needsExternalSigner && !externalMatches ? "warning" : "info");
+      showStatus(signerWarning, bridgeSignerReady ? "info" : "warning");
       window.open(provider.url, "_blank", "noopener,noreferrer");
     },
     [
@@ -2505,23 +2564,25 @@ export default function App() {
     );
   }, []);
 
-  const canSendSelected =
+  const canSendSelected = Boolean(
     selectedAsset &&
-    (selectedAsset.chainId === WORLD_CHAIN_ID
-      ? authenticated &&
-        miniKitReady &&
-        authenticatedWorldAddress &&
-        (() => {
-          try {
-            return (
-              normalizeAddress(authenticatedWorldAddress) ===
-              normalizeAddress(targetAddress)
-            );
-          } catch {
-            return false;
-          }
-        })()
-      : externalMatches);
+      (externalMatches ||
+        (selectedAsset.chainId === WORLD_CHAIN_ID
+          ? authenticated &&
+            miniKitReady &&
+            authenticatedWorldAddress &&
+            (() => {
+              try {
+                return (
+                  normalizeAddress(authenticatedWorldAddress) ===
+                  normalizeAddress(targetAddress)
+                );
+              } catch {
+                return false;
+              }
+            })()
+          : false)),
+  );
 
   const canSubmitRecovery = Boolean(
     canSendSelected &&
@@ -2779,9 +2840,11 @@ export default function App() {
                 <div>
                   <dt>Firma requerida</dt>
                   <dd>
-                    {selectedAsset.chainId === WORLD_CHAIN_ID
-                      ? "MiniKit / World App"
-                      : "Wallet externa firmante exacta"}
+                    {externalMatches
+                      ? "Wallet externa / llave privada local"
+                      : selectedAsset.chainId === WORLD_CHAIN_ID
+                        ? "MiniKit / World App"
+                        : "Wallet externa firmante exacta"}
                   </dd>
                 </div>
                 <div>
@@ -2806,7 +2869,10 @@ export default function App() {
                   type="button"
                   disabled={sending}
                   onClick={async () => {
-                    if (selectedAsset.chainId === WORLD_CHAIN_ID) {
+                    if (
+                      selectedAsset.chainId === WORLD_CHAIN_ID &&
+                      !externalMatches
+                    ) {
                       const confirmed = await confirmWorldAction(
                         "envío de activos",
                       );
@@ -2892,20 +2958,13 @@ export default function App() {
         <section className={viewClass("home")}>
           <section className="home-wallet-card">
             <span className="eyebrow">Wallet activa</span>
-            <h2>{targetAddress ? compactAddress(targetAddress) : "Conecta World App"}</h2>
+            <h2>{targetAddress ? compactAddress(targetAddress) : "Abrir wallet externa"}</h2>
             <p>
               {targetAddress
                 ? "Escanea tus fondos en World Chain y redes EVM externas."
-                : "Autentica World App o analiza una dirección EVM para empezar."}
+                : "Carga la llave privada local, conecta una wallet externa o analiza una direccion EVM para empezar."}
             </p>
             <div className="home-login-actions">
-              <button
-                className="button button--primary"
-                type="button"
-                onClick={loginWithWorldApp}
-              >
-                {miniKitReady ? "Ingresar con World ID" : "Conectar World ID"}
-              </button>
               <button
                 className="button button--secondary"
                 type="button"
@@ -2916,6 +2975,42 @@ export default function App() {
                   ? "Conectando wallet…"
                   : "Conectar wallet externa"}
               </button>
+              <button
+                className="button button--secondary"
+                type="button"
+                onClick={() =>
+                  window.open(WORLD_MINI_APP_URL, "_blank", "noopener,noreferrer")
+                }
+              >
+                Abrir Mini App Worldcoin
+              </button>
+            </div>
+            <div className="local-key-box local-key-box--home">
+              <strong>Abrir dirección con llave privada</strong>
+              <p>
+                Pega la llave privada que genera la misma dirección EVM. RC
+                Wallet External la valida, abre esa dirección y la usa solo en
+                memoria para firmar.
+              </p>
+              <div className="input-row">
+                <input
+                  className="input"
+                  type="password"
+                  value={privateKeyInput}
+                  onChange={(event) => setPrivateKeyInput(event.target.value)}
+                  placeholder="0x..."
+                  autoComplete="off"
+                  spellCheck="false"
+                />
+                <button
+                  className="button button--primary"
+                  type="button"
+                  disabled={externalConnecting || !privateKeyInput.trim()}
+                  onClick={connectPrivateKeySigner}
+                >
+                  Abrir dirección
+                </button>
+              </div>
             </div>
             {connectedExternalAddress && (
               <p className={externalMatches ? "match" : "mismatch"}>
@@ -3065,15 +3160,24 @@ export default function App() {
             )}
           </div>
 
-          <button
-            className="button button--primary"
-            type="button"
-            onClick={loginWithWorldApp}
-          >
-            {miniKitReady
-              ? "Iniciar sesión con World ID"
-              : "Conectar World ID"}
-          </button>
+          <div className="button-row">
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={() =>
+                window.open(WORLD_MINI_APP_URL, "_blank", "noopener,noreferrer")
+              }
+            >
+              Abrir Mini App Worldcoin
+            </button>
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={loginWithWorldApp}
+            >
+              Verificar World ID opcional
+            </button>
+          </div>
 
           <div className="separator">
             <span>o analizar manualmente</span>
@@ -3094,6 +3198,34 @@ export default function App() {
             >
               Analizar
             </button>
+          </div>
+
+          <div className="local-key-box">
+            <strong>Abrir dirección con llave privada</strong>
+            <p>
+              Esta es la ruta principal de RC Wallet External: la llave se
+              valida localmente, se deriva la dirección exacta y luego se
+              escanean los fondos en todas las redes configuradas.
+            </p>
+            <div className="input-row">
+              <input
+                className="input"
+                type="password"
+                value={privateKeyInput}
+                onChange={(event) => setPrivateKeyInput(event.target.value)}
+                placeholder="0x..."
+                autoComplete="off"
+                spellCheck="false"
+              />
+              <button
+                className="button button--primary"
+                type="button"
+                disabled={externalConnecting || !privateKeyInput.trim()}
+                onClick={connectPrivateKeySigner}
+              >
+                Abrir dirección
+              </button>
+            </div>
           </div>
 
           {targetAddress && (
@@ -3138,14 +3270,12 @@ export default function App() {
           )}
 
           <div className="seed-warning">
-            <strong>No se puede exportar una frase semilla de World App.</strong>
+            <strong>RC Wallet External trabaja fuera de World App.</strong>
             <p>
-              RC Wallet External no puede crear, descubrir ni revelar la llave
-              privada de una direccion World App existente. Si ya tienes esa
-              llave privada y genera exactamente la misma direccion, puedes
-              cargarla solo en memoria para firmar movimientos en redes EVM
-              externas. Una semilla nueva crea otra direccion y no controla los
-              fondos anteriores.
+              Usa la llave privada local o una wallet externa para abrir la
+              misma direccion EVM y firmar en redes externas. World App queda
+              como ruta opcional para MiniKit/World Chain; puedes abrir la Mini
+              App desde el enlace superior si necesitas esa ruta.
             </p>
           </div>
         </section>
@@ -3694,12 +3824,17 @@ export default function App() {
               </div>
             )}
 
-            {selectedAsset.chainId !== WORLD_CHAIN_ID && (
+            {selectedAsset && (
               <div className="recovery-explanation">
-                <strong>Esta red no puede firmarse con MiniKit.</strong>
+                <strong>
+                  {selectedAsset.chainId === WORLD_CHAIN_ID
+                    ? "World Chain tambien puede firmarse como wallet externa."
+                    : "Esta red no puede firmarse con MiniKit."}
+                </strong>
                 <p>
-                  Conecta un proveedor externo. La transferencia solo se
-                  habilita si ese proveedor expone exactamente{" "}
+                  {selectedAsset.chainId === WORLD_CHAIN_ID
+                    ? "Si estas fuera de World App, conecta MetaMask, WalletConnect o una llave privada local que abra exactamente "
+                    : "Conecta un proveedor externo. La transferencia solo se habilita si ese proveedor expone exactamente "}
                   <code>{compactAddress(targetAddress)}</code>.
                 </p>
                 <div className="watch-only-box">
@@ -3739,7 +3874,7 @@ export default function App() {
                       disabled={externalConnecting || !privateKeyInput.trim()}
                       onClick={connectPrivateKeySigner}
                     >
-                      Usar
+                      Abrir dirección
                     </button>
                   </div>
                 </div>
@@ -3940,7 +4075,9 @@ export default function App() {
                   ? `Enviar ${selectedAsset.symbol}`
                   : canSendSelected
                     ? "Completa destino y monto para continuar"
-                    : "Firma no disponible para esta red"}
+                    : selectedAsset.chainId === WORLD_CHAIN_ID
+                      ? "Conecta MetaMask, llave local o World App"
+                      : "Conecta wallet firmante exacta"}
             </button>
 
             <p className="fine-print">
@@ -4170,6 +4307,7 @@ export default function App() {
               </div>
 
               {selectedAsset.chainId === WORLD_CHAIN_ID &&
+                !externalMatches &&
                 !safeSameAddress(authenticatedWorldAddress, targetAddress) && (
                   <button
                     className="button button--secondary bridge-connect"
@@ -4180,7 +4318,7 @@ export default function App() {
                   </button>
                 )}
 
-              {selectedAsset.chainId !== WORLD_CHAIN_ID && !externalMatches && (
+              {!externalMatches && (
                 <button
                   className="button button--secondary bridge-connect"
                   type="button"
