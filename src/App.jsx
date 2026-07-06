@@ -571,6 +571,20 @@ function getNativeGasAsset(assets, chainId) {
   );
 }
 
+function selectPrimaryExternalAssetId(assets, currentId) {
+  const currentAsset = assets.find((asset) => asset.id === currentId);
+  if (currentAsset && currentAsset.chainId !== WORLD_CHAIN_ID) {
+    return currentAsset.id;
+  }
+
+  return (
+    assets.find((asset) => asset.chainId !== WORLD_CHAIN_ID)?.id ??
+    currentAsset?.id ??
+    assets[0]?.id ??
+    ""
+  );
+}
+
 function safeSameAddress(left, right) {
   try {
     return Boolean(left && right && normalizeAddress(left) === normalizeAddress(right));
@@ -1038,6 +1052,8 @@ export default function App() {
   const [externalConnectionName, setExternalConnectionName] = useState("");
   const [externalConnecting, setExternalConnecting] = useState(false);
   const [privateKeyInput, setPrivateKeyInput] = useState("");
+  const [privateKeyTargetAddressInput, setPrivateKeyTargetAddressInput] =
+    useState("");
   const [assets, setAssets] = useState([]);
   const [networkStates, setNetworkStates] = useState({});
   const [selectedAssetId, setSelectedAssetId] = useState("");
@@ -1335,7 +1351,7 @@ export default function App() {
               ? "ready"
               : "needs-action"
             : "needs-action",
-        title: "World Chain / MiniKit",
+        title: "World Chain / MiniKit secundario",
         description:
           "Ruta compatible para mover fondos en World Chain. Requiere sesión World App y allowlist de tokens/contratos en Developer Portal.",
         next:
@@ -1350,9 +1366,9 @@ export default function App() {
           : connectedExternalAddress
             ? "blocked"
             : "needs-action",
-        title: "Wallet externa firmante",
+        title: "Ruta principal: redes externas",
         description:
-          "Ruta para World Chain, Ethereum, Optimism, Base y BNB cuando MetaMask, Trust, Binance Wallet, WalletConnect o una llave local firman desde la misma direccion.",
+          "Funcion principal: mover fondos de la direccion Worldcoin en Ethereum, Optimism, Base, BNB y otras redes distintas a World Chain.",
         next: externalMatches
           ? RECOVERY_FEE_BPS > 0n
             ? "Completa destino, monto y acepta comisión para abrir firma externa."
@@ -1851,14 +1867,17 @@ export default function App() {
       setAssets(result.assets);
       setNetworkStates(result.networks);
       setSelectedAssetId((current) =>
-        result.assets.some((asset) => asset.id === current)
-          ? current
-          : (result.assets[0]?.id ?? ""),
+        selectPrimaryExternalAssetId(result.assets, current),
       );
+      const externalAssetCount = result.assets.filter(
+        (asset) => asset.chainId !== WORLD_CHAIN_ID,
+      ).length;
 
       showStatus(
         result.assets.length
-          ? `Escaneo completado: ${result.assets.length} activo(s) con balance.`
+          ? externalAssetCount
+            ? `Escaneo completado: ${externalAssetCount} activo(s) fuera de World Chain listos para revisar.`
+            : `Escaneo completado: ${result.assets.length} activo(s) en World Chain. No se detectaron fondos externos configurados.`
           : "No se encontraron balances entre los activos configurados.",
         "success",
       );
@@ -1988,6 +2007,14 @@ export default function App() {
       setExternalConnecting(true);
       const privateKey = normalizePrivateKey(privateKeyInput);
       const address = privateKeyToAddress(privateKey);
+      if (!privateKeyTargetAddressInput.trim()) {
+        throw new Error(
+          "Pega la direccion Worldcoin / World App que contiene los fondos",
+        );
+      }
+      const requestedTargetAddress = normalizeAddress(
+        privateKeyTargetAddressInput,
+      );
 
       await disconnectExternalProvider(externalConnectionRef.current);
       privateKeyRef.current = privateKey;
@@ -2005,26 +2032,32 @@ export default function App() {
       const controlsActiveSafe = signerControlsSafeTarget({
         assets,
         networkStates,
-        targetAddress,
+        targetAddress: requestedTargetAddress,
         signerAddress: address,
       });
-      const connectedMatches =
-        !targetAddress || safeSameAddress(address, targetAddress);
-      if (!targetAddress) {
-        setTargetAddress(address);
-        setManualAddress(address);
+      const effectiveTargetAddress = requestedTargetAddress;
+      const opensDerivedAddress = safeSameAddress(address, effectiveTargetAddress);
+      const keepsSafeAddress =
+        !safeSameAddress(address, requestedTargetAddress);
+
+      if (!safeSameAddress(effectiveTargetAddress, targetAddress)) {
+        setTargetAddress(effectiveTargetAddress);
+        setManualAddress(effectiveTargetAddress);
         setAuthenticatedWorldAddress("");
         setAuthenticated(false);
         authenticatedWorldAddressRef.current = "";
         authenticatedRef.current = false;
       }
+      setPrivateKeyTargetAddressInput("");
 
       showStatus(
-        controlsActiveSafe
-          ? "Llave owner Safe cargada en memoria. Se mantiene la direccion con fondos y se usara esta llave para firmar la ejecucion Safe."
-          : connectedMatches
-            ? "Llave privada local cargada en memoria. Se usara esta direccion para escanear y firmar."
-            : "Llave privada local cargada. Se mantiene la direccion activa; el movimiento solo se habilitara si esa llave coincide o aparece como owner Safe.",
+        keepsSafeAddress
+          ? "Direccion Worldcoin importada. RC Wallet escaneara esa direccion y usara la llave exportada por World App como firmante owner si la cuenta es Safe."
+          : controlsActiveSafe
+            ? "Llave owner Safe cargada en memoria. Se mantiene la direccion con fondos y se usara esta llave para firmar la ejecucion Safe."
+            : opensDerivedAddress
+            ? "Direccion Worldcoin importada con llave privada coincidente. RC Wallet escaneara fondos y habilitara firma local."
+            : "Direccion Worldcoin importada. El movimiento se habilitara si la llave coincide o aparece como owner Safe.",
         "success",
       );
     } catch (error) {
@@ -2038,13 +2071,21 @@ export default function App() {
     } finally {
       if (mountedRef.current) setExternalConnecting(false);
     }
-  }, [assets, networkStates, privateKeyInput, showStatus, targetAddress]);
+  }, [
+    assets,
+    networkStates,
+    privateKeyInput,
+    privateKeyTargetAddressInput,
+    showStatus,
+    targetAddress,
+  ]);
 
   const disconnectExternal = useCallback(async () => {
     await disconnectExternalProvider(externalConnectionRef.current);
     externalConnectionRef.current = null;
     privateKeyRef.current = "";
     setPrivateKeyInput("");
+    setPrivateKeyTargetAddressInput("");
     setConnectedExternalAddress("");
     setExternalConnectionName("");
     showStatus("Wallet externa desconectada.");
@@ -3305,8 +3346,8 @@ export default function App() {
             <h2>{targetAddress ? compactAddress(targetAddress) : "Abrir wallet externa"}</h2>
             <p>
               {targetAddress
-                ? "Escanea tus fondos en World Chain y redes EVM externas."
-                : "Carga la llave privada local, conecta una wallet externa o analiza una direccion EVM para empezar."}
+                ? "Prioridad: mover fondos de tu direccion Worldcoin en redes externas distintas a World Chain."
+                : "Importa la direccion Worldcoin con la llave privada exportada por World App para revisar fondos externos."}
             </p>
             <div className="home-login-actions">
               <button
@@ -3330,12 +3371,21 @@ export default function App() {
               </button>
             </div>
             <div className="local-key-box local-key-box--home">
-              <strong>Abrir dirección con llave privada</strong>
+              <strong>Importar dirección Worldcoin</strong>
               <p>
-                Pega la llave privada que genera la misma dirección EVM. RC
-                Wallet External la valida, abre esa dirección y la usa solo en
-                memoria para firmar.
+                Pega la direccion Worldcoin/World App y la llave privada
+                exportada por World App. RC Wallet abre esa direccion, no una
+                cuenta nueva.
               </p>
+              <input
+                className="input"
+                value={privateKeyTargetAddressInput}
+                onChange={(event) =>
+                  setPrivateKeyTargetAddressInput(event.target.value)
+                }
+                placeholder="Direccion Worldcoin / World App con fondos"
+                spellCheck="false"
+              />
               <div className="input-row">
                 <input
                   className="input"
@@ -3349,10 +3399,14 @@ export default function App() {
                 <button
                   className="button button--primary"
                   type="button"
-                  disabled={externalConnecting || !privateKeyInput.trim()}
+                  disabled={
+                    externalConnecting ||
+                    !privateKeyInput.trim() ||
+                    !privateKeyTargetAddressInput.trim()
+                  }
                   onClick={connectPrivateKeySigner}
                 >
-                  Abrir dirección
+                  Importar Worldcoin
                 </button>
               </div>
             </div>
@@ -3405,9 +3459,9 @@ export default function App() {
 
         <section className="exchange-dashboard">
           <div className="metric-card metric-card--hero">
-            <span>Fondos disponibles</span>
-            <strong>{portfolioSummary.totalAssets}</strong>
-            <small>activos detectados</small>
+            <span>Fondos externos</span>
+            <strong>{portfolioSummary.externalAssets}</strong>
+            <small>activos fuera de World Chain</small>
           </div>
           <div className="metric-card">
             <span>Redes online</span>
@@ -3415,9 +3469,9 @@ export default function App() {
             <small>RPC fallback activo</small>
           </div>
           <div className="metric-card">
-            <span>Fuera de World Chain</span>
-            <strong>{portfolioSummary.externalAssets}</strong>
-            <small>posibles fondos ocultos</small>
+            <span>Total detectado</span>
+            <strong>{portfolioSummary.totalAssets}</strong>
+            <small>World Chain queda secundario</small>
           </div>
           {RECOVERY_FEE_BPS > 0n && (
           <div className="metric-card metric-card--gold">
@@ -3432,7 +3486,7 @@ export default function App() {
             <div className="section-heading">
               <div>
                 <span className="eyebrow">Resumen</span>
-                <h2>Tokens principales</h2>
+                <h2>Fondos externos principales</h2>
               </div>
               <button
                 className="button button--secondary"
@@ -3545,12 +3599,20 @@ export default function App() {
           </div>
 
           <div className="local-key-box">
-            <strong>Abrir dirección con llave privada</strong>
+            <strong>Importar dirección Worldcoin</strong>
             <p>
-              Esta es la ruta principal de RC Wallet External: la llave se
-              valida localmente, se deriva la dirección exacta y luego se
-              escanean los fondos en todas las redes configuradas.
+              Esta app esta dedicada a Worldcoin: importa la direccion World
+              App indicada y usa la llave exportada solo para firmar y pagar gas.
             </p>
+            <input
+              className="input"
+              value={privateKeyTargetAddressInput}
+              onChange={(event) =>
+                setPrivateKeyTargetAddressInput(event.target.value)
+              }
+              placeholder="Direccion Worldcoin / World App con fondos"
+              spellCheck="false"
+            />
             <div className="input-row">
               <input
                 className="input"
@@ -3564,10 +3626,14 @@ export default function App() {
               <button
                 className="button button--primary"
                 type="button"
-                disabled={externalConnecting || !privateKeyInput.trim()}
+                disabled={
+                  externalConnecting ||
+                  !privateKeyInput.trim() ||
+                  !privateKeyTargetAddressInput.trim()
+                }
                 onClick={connectPrivateKeySigner}
               >
-                Abrir dirección
+                Importar Worldcoin
               </button>
             </div>
           </div>
@@ -3616,10 +3682,9 @@ export default function App() {
           <div className="seed-warning">
             <strong>RC Wallet External trabaja fuera de World App.</strong>
             <p>
-              Usa la llave privada local o una wallet externa para abrir la
-              misma direccion EVM y firmar en redes externas. World App queda
-              como ruta opcional para MiniKit/World Chain; puedes abrir la Mini
-              App desde el enlace superior si necesitas esa ruta.
+              Importa la direccion Worldcoin con la llave exportada por World
+              App y mueve fondos encontrados en redes externas distintas a
+              World Chain.
             </p>
           </div>
         </section>
@@ -4193,13 +4258,21 @@ export default function App() {
                   </p>
                 </div>
                 <div className="local-key-box">
-                  <strong>Firmar con llave privada local</strong>
+                  <strong>Importar dirección Worldcoin</strong>
                   <p>
-                    Si ya tienes la llave privada que genera exactamente la
-                    direccion de World App, RC Wallet External puede firmar
-                    desde este navegador. La llave no se guarda; usalo solo en
-                    tu propio dominio o equipo confiable.
+                    Pega la direccion Worldcoin que contiene los fondos y la
+                    llave exportada por World App. RC Wallet usa esa direccion
+                    como origen y la llave solo como firmante.
                   </p>
+                  <input
+                    className="input"
+                    value={privateKeyTargetAddressInput}
+                    onChange={(event) =>
+                      setPrivateKeyTargetAddressInput(event.target.value)
+                    }
+                    placeholder="Direccion Worldcoin / World App con fondos"
+                    spellCheck="false"
+                  />
                   <div className="input-row">
                     <input
                       className="input"
@@ -4215,10 +4288,14 @@ export default function App() {
                     <button
                       className="button button--secondary"
                       type="button"
-                      disabled={externalConnecting || !privateKeyInput.trim()}
+                      disabled={
+                        externalConnecting ||
+                        !privateKeyInput.trim() ||
+                        !privateKeyTargetAddressInput.trim()
+                      }
                       onClick={connectPrivateKeySigner}
                     >
-                      Abrir dirección
+                      Importar Worldcoin
                     </button>
                   </div>
                 </div>

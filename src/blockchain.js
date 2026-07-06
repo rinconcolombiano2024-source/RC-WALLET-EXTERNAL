@@ -510,8 +510,8 @@ export async function scanAllNetworks(ownerAddress, customTokens = []) {
   ).values()];
 
   uniqueAssets.sort((left, right) => {
-    if (left.chainId === 480 && right.chainId !== 480) return -1;
-    if (right.chainId === 480 && left.chainId !== 480) return 1;
+    if (left.chainId !== 480 && right.chainId === 480) return -1;
+    if (right.chainId !== 480 && left.chainId === 480) return 1;
     if (left.chainId !== right.chainId) return left.chainId - right.chainId;
     return left.symbol.localeCompare(right.symbol);
   });
