@@ -1,24 +1,21 @@
-const DEFAULT_WORLD_ID_RP_ID = "rp_44f2772c9e0bb5c3";
+import { ethers } from "ethers";
 
-async function readJsonBody(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-  if (typeof req.body === "string") {
-    try {
-      return JSON.parse(req.body);
-    } catch {
-      return {};
-    }
+const RECOVERY_TYPES = Object.freeze({
+  RecoveryAuthorization: [
+    { name: "wallet", type: "address" },
+    { name: "targetChainId", type: "uint256" },
+    { name: "nonce", type: "bytes32" },
+    { name: "expiresAt", type: "uint256" },
+    { name: "purpose", type: "string" },
+  ],
+});
+
+function normalizeAddress(address) {
+  if (!ethers.isAddress(address)) {
+    throw new Error("Direccion EVM invalida");
   }
 
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  if (!chunks.length) return {};
-
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    return {};
-  }
+  return ethers.getAddress(address);
 }
 
 export default async function handler(req, res) {
@@ -27,54 +24,56 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  res.setHeader("Cache-Control", "no-store");
-
-  const expectedRpId =
-    process.env.WORLD_ID_RP_ID ||
-    process.env.VITE_WORLD_RP_ID ||
-    process.env.VITE_WORLD_CLIENT_ID ||
-    DEFAULT_WORLD_ID_RP_ID;
-
-  const { rp_id: rpId, idkitResponse } = await readJsonBody(req);
-
-  if (!rpId || rpId !== expectedRpId) {
-    return res.status(400).json({
-      error: "RP ID no coincide con la configuración del servidor.",
-      expected: expectedRpId,
-      received: rpId || "",
-    });
-  }
-
-  if (!idkitResponse) {
-    return res.status(400).json({ error: "Falta la prueba IDKit para verificar." });
-  }
-
   try {
-    const response = await fetch(`https://developer.world.org/api/v4/verify/${expectedRpId}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(idkitResponse),
-    });
-
-    const result = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
+    const proof = req.body?.proof ?? req.body;
+    if (
+      proof?.format !== "rc-wallet-recovery-proof" ||
+      proof?.version !== 1 ||
+      !proof?.typedData ||
+      !proof?.signature
+    ) {
       return res.status(400).json({
-        error: result?.error || result?.message || "World ID rechazó la prueba.",
-        details: result,
+        isValid: false,
+        error: "Formato de prueba invalido",
       });
     }
 
+    const { domain, message, primaryType } = proof.typedData;
+    if (primaryType !== "RecoveryAuthorization") {
+      throw new Error("Tipo de prueba no soportado");
+    }
+
+    const wallet = normalizeAddress(message.wallet);
+    const signerAddress = normalizeAddress(proof.signerAddress);
+    const types = { ...RECOVERY_TYPES };
+    const digest = ethers.TypedDataEncoder.hash(domain, types, message);
+    const recoveredAddress = normalizeAddress(
+      ethers.verifyTypedData(domain, types, message, proof.signature),
+    );
+    const expired = Number(message.expiresAt) < Math.floor(Date.now() / 1000);
+    const signerMatches = recoveredAddress === signerAddress;
+    const walletMatches = recoveredAddress === wallet;
+
     return res.status(200).json({
-      success: true,
-      result,
+      isValid: signerMatches && !expired,
+      classification: walletMatches
+        ? "portable-eoa-signature"
+        : signerMatches
+          ? "owner-signature"
+          : "signature-not-matching",
+      digest,
+      wallet,
+      signerAddress,
+      recoveredAddress,
+      signerMatches,
+      walletMatches,
+      expired,
+      targetChainId: Number(message.targetChainId),
     });
   } catch (error) {
-    return res.status(500).json({
-      error:
-        error instanceof Error
-          ? error.message
-          : "No se pudo verificar World ID.",
+    return res.status(400).json({
+      isValid: false,
+      error: error instanceof Error ? error.message : "No se pudo verificar la prueba",
     });
   }
 }
