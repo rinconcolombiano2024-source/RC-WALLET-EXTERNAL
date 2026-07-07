@@ -8,11 +8,14 @@ import React, {
 import { ethers } from "ethers";
 import { MiniKit } from "@worldcoin/minikit-js";
 import {
+  buildSafeUiTransactionDraft,
   formatBalance,
   isValidEvmAddressInput,
   normalizePrivateKey,
   normalizeAddress,
   privateKeyToAddress,
+  proposeSafeTransactionWithExternalWallet,
+  proposeSafeTransactionWithPrivateKeyWallet,
   safeMirrorOwnersInclude,
   safeOwnersInclude,
   scanAllNetworks,
@@ -552,7 +555,104 @@ function Status({ status }) {
   );
 }
 
-function RecoveryBadge({ asset, externalMatches }) {
+function getAssetMovementState({
+  asset,
+  targetAddress,
+  connectedExternalAddress,
+}) {
+  if (!asset) {
+    return {
+      level: "pending",
+      label: "Selecciona activo",
+      detail: "Pendiente",
+    };
+  }
+
+  const sameSigner = Boolean(
+    connectedExternalAddress &&
+      targetAddress &&
+      safeSameAddress(connectedExternalAddress, targetAddress),
+  );
+  const safeOwner = Boolean(
+    connectedExternalAddress &&
+      !sameSigner &&
+      safeOwnersInclude(asset.accountState, connectedExternalAddress),
+  );
+  const safeMirrorOwner = Boolean(
+    connectedExternalAddress &&
+      !sameSigner &&
+      safeMirrorOwnersInclude(asset.accountState, connectedExternalAddress),
+  );
+  const safeMirrorReady = Boolean(
+    asset.accountState?.counterfactualSafe?.deployment?.ready,
+  );
+
+  if (sameSigner) {
+    return {
+      level: "ready",
+      label: "Mover ahora",
+      detail: "Firma exacta",
+    };
+  }
+
+  if (safeOwner) {
+    return {
+      level: "ready",
+      label: "Mover con Safe",
+      detail: "Owner Safe",
+    };
+  }
+
+  if (safeMirrorOwner && safeMirrorReady) {
+    return {
+      level: "ready",
+      label: "Desplegar y mover",
+      detail: "Safe lista",
+    };
+  }
+
+  if (safeMirrorOwner) {
+    return {
+      level: "pending",
+      label: "Validar Safe",
+      detail: "Falta creacion",
+    };
+  }
+
+  if (asset.chainId === WORLD_CHAIN_ID) {
+    return {
+      level: "ready",
+      label: "Mover con World App",
+      detail: "World Chain",
+    };
+  }
+
+  if (connectedExternalAddress) {
+    return {
+      level: "blocked",
+      label: "Firma no coincide",
+      detail: "Importa owner correcto",
+    };
+  }
+
+  return {
+    level: "pending",
+    label: "Importar llave para mover",
+    detail: "Falta firmante",
+  };
+}
+
+function RecoveryBadge({ asset, externalMatches, movementState }) {
+  if (movementState) {
+    const className =
+      movementState.level === "ready"
+        ? "badge badge--green"
+        : movementState.level === "blocked"
+          ? "badge badge--red"
+          : "badge badge--amber";
+    return <span className={className}>{movementState.label}</span>;
+  }
+
   if (externalMatches) {
     return <span className="badge badge--green">Firma externa disponible</span>;
   }
@@ -562,7 +662,7 @@ function RecoveryBadge({ asset, externalMatches }) {
   if (externalMatches) {
     return <span className="badge badge--green">Firma externa disponible</span>;
   }
-  return <span className="badge badge--amber">Solo detección</span>;
+  return <span className="badge badge--amber">Importar llave para mover</span>;
 }
 
 function getNativeGasAsset(assets, chainId) {
@@ -956,10 +1056,10 @@ function createRecoveryDiagnosis({
       title: "❌ La wallet conectada no controla esos fondos",
       route: "Firma externa no coincidente",
       action:
-        "Si Trust Wallet la muestra como solo lectura/watch-only, no tiene la llave para firmar. Desconecta y prueba con una wallet que controle exactamente la misma dirección, no una cuenta importada solo para mirar.",
+        "Conecta una wallet u owner Safe que firme exactamente la dirección donde están los fondos.",
       requirements: [
         "La dirección firmante debe ser idéntica",
-        "No sirve modo observar/watch-only",
+        "Owner Safe confirmado cuando la cuenta sea smart wallet",
       ],
     };
   }
@@ -978,7 +1078,7 @@ function createRecoveryDiagnosis({
       ? "RC Wallet detectó estructura Safe. Para mover fondos se necesitan owners, threshold y ejecución Safe real. Si no están disponibles, la app documenta la ruta pero no puede firmar por ti."
       : accountIsContract
       ? "Genera la prueba RC Link y revisa EIP-1271 / ERC-4337 / Safe. Si no existe un módulo, owner o bundler autorizado en esa red, la app solo puede documentar el caso."
-      : "Importa la llave privada local o conecta MetaMask, Trust Wallet, Binance Wallet o WalletConnect con la direccion exacta y con capacidad de firmar. Si la cuenta aparece como solo lectura, ninguna app puede mover los fondos.",
+      : "Importa la llave privada local o conecta MetaMask, Trust Wallet, Binance Wallet o WalletConnect con la dirección exacta y con capacidad de firmar.",
     requirements: accountIsContract
       ? [
           safeDetected ? "Firmas de owners Safe" : "Autoridad de smart account",
@@ -987,6 +1087,393 @@ function createRecoveryDiagnosis({
         ]
       : ["Llave privada local o signer real", "Misma direccion origen"],
   };
+}
+
+function safeAppChainPrefix(chainId) {
+  const prefixes = {
+    1: "eth",
+    10: "oeth",
+    56: "bnb",
+    480: "wc",
+    8453: "base",
+  };
+  return prefixes[chainId] ?? null;
+}
+
+function safeAppUrl(network, address) {
+  const prefix = safeAppChainPrefix(network?.chainId);
+  return prefix && address
+    ? `https://app.safe.global/home?safe=${prefix}:${address}`
+    : "https://app.safe.global/";
+}
+
+function displaySafeValue(value) {
+  if (value === null || value === undefined || value === "") return "No disponible";
+  const text = String(value);
+  if (/^0x[a-fA-F0-9]{40}$/.test(text)) return compactAddress(text);
+  if (text.length > 28) return `${text.slice(0, 14)}...${text.slice(-10)}`;
+  return text;
+}
+
+function getSafeRescueState({ asset, targetAddress, connectedExternalAddress }) {
+  const accountState = asset?.accountState ?? null;
+  const safe = accountState?.safe ?? null;
+  const mirror = accountState?.counterfactualSafe ?? null;
+  const deployment = mirror?.deployment ?? null;
+  const signerIsOrigin = safeSameAddress(connectedExternalAddress, targetAddress);
+  const signerIsSafeOwner = safeOwnersInclude(accountState, connectedExternalAddress);
+  const signerIsMirrorOwner = safeMirrorOwnersInclude(
+    accountState,
+    connectedExternalAddress,
+  );
+  const safeReady = Boolean(
+    deployment?.ready && deployment?.targetPredictionMatches,
+  );
+
+  if (signerIsOrigin) {
+    return {
+      level: "ready",
+      label: "Llave exacta",
+      title: "Mover como wallet EVM directa",
+      action:
+        "La firma conectada coincide con la direccion que contiene los fondos. RC Wallet puede enviar ETH o ERC20 desde esta red.",
+    };
+  }
+
+  if (safe?.detected && signerIsSafeOwner && Number(safe.threshold) === 1) {
+    return {
+      level: "ready",
+      label: "Safe lista",
+      title: "Mover con Safe desplegada",
+      action:
+        "La direccion con fondos ya es Safe en esta red y la llave conectada es owner. RC Wallet ejecutara execTransaction.",
+    };
+  }
+
+  if (safe?.detected && signerIsSafeOwner) {
+    return {
+      level: "pending",
+      label: "Faltan firmas",
+      title: "Safe desplegada con umbral mayor",
+      action:
+        "La llave conectada es owner, pero esta Safe exige mas firmas. Reune los owners requeridos o usa Safe UI.",
+    };
+  }
+
+  if (mirror?.detected && signerIsMirrorOwner && safeReady) {
+    return {
+      level: "ready",
+      label: "Safe espejo lista",
+      title: "Desplegar Safe y mover",
+      action:
+        "La Safe existe en World Chain, la llave conectada es owner y la prediccion en esta red coincide con la direccion con fondos.",
+    };
+  }
+
+  if (mirror?.detected && signerIsMirrorOwner) {
+    return {
+      level: "pending",
+      label: "Validar Safe",
+      title: "Safe espejo detectada",
+      action:
+        "La llave aparece como owner de la Safe de World Chain, pero aun falta validar la creacion original, factory, singleton, salt o prediccion exacta.",
+    };
+  }
+
+  if (safe?.detected || mirror?.detected) {
+    return {
+      level: "blocked",
+      label: "Owner no coincide",
+      title: "Safe detectada sin owner conectado",
+      action:
+        "La direccion parece Safe, pero la llave conectada no aparece como owner para ejecutar movimientos.",
+    };
+  }
+
+  return {
+    level: "pending",
+    label: "Firma requerida",
+    title: "Sin Safe compatible detectada",
+    action:
+      "Importa la llave exacta o conecta una wallet que pueda firmar desde la direccion con fondos.",
+  };
+}
+
+function buildSafeRescueSnapshot({
+  asset,
+  targetAddress,
+  connectedExternalAddress,
+}) {
+  if (!asset) return null;
+
+  const accountState = asset.accountState ?? {};
+  const safe = accountState.safe ?? {};
+  const mirror = accountState.counterfactualSafe ?? {};
+  const deployment = mirror.deployment ?? {};
+  const rescueState = getSafeRescueState({
+    asset,
+    targetAddress,
+    connectedExternalAddress,
+  });
+  const signerIsOrigin = safeSameAddress(connectedExternalAddress, targetAddress);
+  const signerIsSafeOwner = safeOwnersInclude(
+    accountState,
+    connectedExternalAddress,
+  );
+  const signerIsMirrorOwner = safeMirrorOwnersInclude(
+    accountState,
+    connectedExternalAddress,
+  );
+  const deployedSafeReady = Boolean(
+    safe.detected && signerIsSafeOwner && Number(safe.threshold) === 1,
+  );
+  const mirrorReady = Boolean(
+    mirror.detected &&
+      signerIsMirrorOwner &&
+      deployment.ready &&
+      deployment.targetPredictionMatches,
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    routeLabel: rescueState.label,
+    routeTitle: rescueState.title,
+    routeAction: rescueState.action,
+    executionRoute: signerIsOrigin
+      ? "direct-eoa"
+      : deployedSafeReady
+        ? "deployed-safe-exec-transaction"
+        : mirrorReady
+          ? "counterfactual-safe-deploy-and-execute"
+          : "not-ready",
+    canMoveNow: Boolean(signerIsOrigin || deployedSafeReady || mirrorReady),
+    canMoveWithPrivateKey: signerIsOrigin,
+    canMoveWithDeployedSafe: deployedSafeReady,
+    canDeploySafeMirrorAndMove: mirrorReady,
+    targetAddress,
+    connectedExternalAddress: connectedExternalAddress || null,
+    network: {
+      name: asset.networkName,
+      chainId: asset.chainId,
+      explorer: explorerAddressUrl(asset.network, targetAddress),
+      safeUi: safeAppUrl(asset.network, targetAddress),
+    },
+    asset: {
+      symbol: asset.symbol,
+      balance: asset.balance,
+      displayBalance: asset.displayBalance,
+      tokenAddress: asset.address,
+      isNative: asset.isNative,
+    },
+    safe: {
+      detected: Boolean(safe.detected),
+      version: safe.version ?? null,
+      owners: safe.owners ?? [],
+      threshold: safe.threshold ?? null,
+      modules: safe.modules ?? [],
+      signerIsOwner: signerIsSafeOwner,
+    },
+    counterfactualSafe: {
+      detected: Boolean(mirror.detected),
+      sourceNetworkName: mirror.sourceNetworkName ?? null,
+      owners: mirror.owners ?? [],
+      threshold: mirror.threshold ?? null,
+      signerIsOwner: signerIsMirrorOwner,
+      deployment: {
+        ready: Boolean(deployment.ready),
+        canReplayCrossChain: Boolean(deployment.canReplayCrossChain),
+        targetPredictionMatches: Boolean(deployment.targetPredictionMatches),
+        targetFactoryHasCode: Boolean(deployment.targetFactoryHasCode),
+        targetSingletonHasCode: Boolean(deployment.targetSingletonHasCode),
+        factory: deployment.factory ?? null,
+        singleton: deployment.singleton ?? null,
+        saltNonce: deployment.saltNonce ?? null,
+        targetPrediction: deployment.targetPrediction ?? null,
+        sourceUrl: deployment.sourceUrl ?? null,
+      },
+    },
+    requiredNextAction:
+      signerIsOrigin || deployedSafeReady || mirrorReady
+        ? "Completar destinatario, monto, gas y firmar el movimiento."
+        : safe.detected || mirror.detected
+          ? "Conectar un owner Safe valido, reunir firmas si el umbral es mayor a 1 o validar despliegue deterministico."
+          : "Importar la llave exacta o conectar una wallet que firme desde la direccion con fondos.",
+  };
+}
+
+function SafeRescuePanel({
+  asset,
+  targetAddress,
+  connectedExternalAddress,
+  onCopyPlan,
+  onCopySafeUiDraft,
+  onProposeSafeTx,
+}) {
+  if (!asset) return null;
+
+  const accountState = asset.accountState ?? {};
+  const safe = accountState.safe ?? {};
+  const mirror = accountState.counterfactualSafe ?? {};
+  const deployment = mirror.deployment ?? {};
+  const rescueState = getSafeRescueState({
+    asset,
+    targetAddress,
+    connectedExternalAddress,
+  });
+  const owners = safe.detected ? safe.owners : mirror.owners;
+  const threshold = safe.detected ? safe.threshold : mirror.threshold;
+  const safeDetected = Boolean(safe.detected || mirror.detected);
+  const signerIsOrigin = safeSameAddress(connectedExternalAddress, targetAddress);
+  const signerIsOwner =
+    safeOwnersInclude(accountState, connectedExternalAddress) ||
+    safeMirrorOwnersInclude(accountState, connectedExternalAddress);
+
+  return (
+    <section className={`safe-rescue safe-rescue--${rescueState.level}`}>
+      <div className="safe-rescue__head">
+        <div>
+          <span className="eyebrow">Safe Rescue Center</span>
+          <h3>{rescueState.title}</h3>
+          <p>{rescueState.action}</p>
+        </div>
+        <span
+          className={`badge ${
+            rescueState.level === "ready"
+              ? "badge--green"
+              : rescueState.level === "blocked"
+                ? "badge--red"
+                : "badge--amber"
+          }`}
+        >
+          {rescueState.label}
+        </span>
+      </div>
+
+      <dl className="safe-rescue__grid">
+        <div>
+          <dt>Direccion con fondos</dt>
+          <dd>{compactAddress(targetAddress)}</dd>
+        </div>
+        <div>
+          <dt>Red objetivo</dt>
+          <dd>{asset.networkName}</dd>
+        </div>
+        <div>
+          <dt>Firmante conectado</dt>
+          <dd>{connectedExternalAddress ? compactAddress(connectedExternalAddress) : "Falta firmante"}</dd>
+        </div>
+        <div>
+          <dt>Control</dt>
+          <dd>{signerIsOrigin ? "Llave exacta" : signerIsOwner ? "Owner Safe" : "No confirmado"}</dd>
+        </div>
+        <div>
+          <dt>Safe</dt>
+          <dd>{safe.detected ? `Desplegada ${safe.version || ""}` : mirror.detected ? `En ${mirror.sourceNetworkName}` : "No detectada"}</dd>
+        </div>
+        <div>
+          <dt>Umbral</dt>
+          <dd>{threshold ? `${threshold}/${owners?.length ?? 0}` : "No aplica"}</dd>
+        </div>
+        <div>
+          <dt>Prediccion</dt>
+          <dd>{deployment.targetPredictionMatches ? "Coincide" : deployment.targetPrediction ? "No coincide" : "No disponible"}</dd>
+        </div>
+        <div>
+          <dt>Despliegue</dt>
+          <dd>{deployment.ready ? "Listo" : safe.detected ? "Ya existe" : "Pendiente"}</dd>
+        </div>
+      </dl>
+
+      {safeDetected && (
+        <div className="safe-rescue__details">
+          <div>
+            <strong>Owners</strong>
+            <div className="safe-owner-list">
+              {(owners ?? []).length ? (
+                owners.map((owner) => (
+                  <code
+                    className={
+                      safeSameAddress(owner, connectedExternalAddress)
+                        ? "safe-owner safe-owner--active"
+                        : "safe-owner"
+                    }
+                    key={owner}
+                  >
+                    {compactAddress(owner)}
+                  </code>
+                ))
+              ) : (
+                <span>No disponibles</span>
+              )}
+            </div>
+          </div>
+
+          {(mirror.detected || deployment.targetPrediction) && (
+            <div className="safe-deploy-matrix">
+              <div>
+                <span>Factory</span>
+                <code>{displaySafeValue(deployment.factory)}</code>
+              </div>
+              <div>
+                <span>Singleton</span>
+                <code>{displaySafeValue(deployment.singleton)}</code>
+              </div>
+              <div>
+                <span>Salt</span>
+                <code>{displaySafeValue(deployment.saltNonce)}</code>
+              </div>
+              <div>
+                <span>Prediccion destino</span>
+                <code>{displaySafeValue(deployment.targetPrediction)}</code>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="safe-rescue__actions">
+        <a
+          className="button button--secondary"
+          href={explorerAddressUrl(asset.network, targetAddress)}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Abrir explorer
+        </a>
+        {safeDetected && (
+          <a
+            className="button button--secondary"
+            href={safeAppUrl(asset.network, targetAddress)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Abrir Safe UI
+          </a>
+        )}
+        <button className="button button--secondary" type="button" onClick={onCopyPlan}>
+          Copiar dossier Safe
+        </button>
+        {safeDetected && (
+          <button
+            className="button button--secondary"
+            type="button"
+            onClick={onCopySafeUiDraft}
+          >
+            Copiar tx Safe UI
+          </button>
+        )}
+        {safe.detected && signerIsOwner && (
+          <button
+            className="button button--secondary"
+            type="button"
+            onClick={onProposeSafeTx}
+          >
+            Proponer en Safe
+          </button>
+        )}
+      </div>
+    </section>
+  );
 }
 
 function stopQrScannerStream(stream) {
@@ -1193,22 +1680,65 @@ export default function App() {
     [connectedExternalAddress, selectedAsset, targetAddress],
   );
 
+  const selectedAssetCounterfactualSafeReady = useMemo(
+    () =>
+      Boolean(
+        selectedAssetUsesCounterfactualSafeOwnerSigner &&
+          selectedAsset?.accountState?.counterfactualSafe?.deployment?.ready,
+      ),
+    [selectedAsset, selectedAssetUsesCounterfactualSafeOwnerSigner],
+  );
+
   const externalMatches = useMemo(() => {
     if (!targetAddress || !connectedExternalAddress) return false;
     try {
       return (
         normalizeAddress(targetAddress) ===
           normalizeAddress(connectedExternalAddress) ||
-        selectedAssetUsesSafeOwnerSigner
+        selectedAssetUsesSafeOwnerSigner ||
+        selectedAssetCounterfactualSafeReady
       );
     } catch {
       return false;
     }
   }, [
     connectedExternalAddress,
+    selectedAssetCounterfactualSafeReady,
     selectedAssetUsesSafeOwnerSigner,
     targetAddress,
   ]);
+
+  const selectedAssetMovementState = useMemo(
+    () =>
+      getAssetMovementState({
+        asset: selectedAsset,
+        targetAddress,
+        connectedExternalAddress,
+      }),
+    [connectedExternalAddress, selectedAsset, targetAddress],
+  );
+
+  const selectedAssetSafeUiDraftAvailable = useMemo(
+    () =>
+      Boolean(
+        selectedAsset?.accountState?.safe?.detected ||
+          selectedAsset?.accountState?.counterfactualSafe?.detected,
+      ),
+    [selectedAsset],
+  );
+
+  const activeSafeSignerAddress =
+    connectedExternalAddress || externalConnectionRef.current?.account || "";
+
+  const selectedAssetSafeProposalAvailable = useMemo(
+    () =>
+      Boolean(
+        selectedAsset?.accountState?.safe?.detected &&
+          activeSafeSignerAddress &&
+          safeOwnersInclude(selectedAsset.accountState, activeSafeSignerAddress),
+      ),
+    [activeSafeSignerAddress, selectedAsset],
+  );
 
   const selectedNativeGasAsset = useMemo(
     () =>
@@ -1428,7 +1958,7 @@ export default function App() {
             : "Completa destino y monto para abrir firma externa."
           : connectedExternalAddress
             ? "La wallet conectada no firma desde la dirección de los fondos."
-            : "Conecta una wallet externa que no sea solo lectura/watch-only.",
+            : "Conecta una wallet externa u owner Safe que pueda firmar.",
       },
       {
         id: "rc-link",
@@ -1852,6 +2382,19 @@ export default function App() {
     }, 450);
   }, []);
 
+  const openSendFormForAsset = useCallback((assetId) => {
+    setSelectedAssetId(assetId);
+    setTokenScreenOpen(false);
+    setActiveTab("recovery");
+    window.setTimeout(() => {
+      sendSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      document.getElementById("recipient")?.focus();
+    }, 450);
+  }, []);
+
   const openTokenScreen = useCallback((assetId) => {
     setSelectedAssetId(assetId);
     setTokenScreenOpen(true);
@@ -1960,8 +2503,10 @@ export default function App() {
 
     if (selectedAssetUsesCounterfactualSafeOwnerSigner && selectedAsset) {
       showStatus(
-        `La llave cargada es owner de la Safe en World Chain, pero en ${selectedAsset.networkName} falta desplegar esa Safe antes de mover los fondos.`,
-        "warning",
+        selectedAssetCounterfactualSafeReady
+          ? `La llave cargada es owner de la Safe en World Chain. RC Wallet puede desplegar la misma Safe en ${selectedAsset.networkName} y mover los fondos.`
+          : `La llave cargada es owner de la Safe en World Chain, pero faltan datos verificables para desplegar esa misma Safe en ${selectedAsset.networkName}.`,
+        selectedAssetCounterfactualSafeReady ? "success" : "warning",
       );
       return;
     }
@@ -1990,6 +2535,7 @@ export default function App() {
     externalControlsSafeTarget,
     externalMatches,
     selectedAsset,
+    selectedAssetCounterfactualSafeReady,
     selectedAssetUsesCounterfactualSafeOwnerSigner,
     showStatus,
     targetAddress,
@@ -2046,7 +2592,7 @@ export default function App() {
         showStatus(
           connectedMatches
             ? "Wallet externa conectada y coincide con la wallet activa."
-            : "La wallet externa conectada no controla esta dirección. Si es solo lectura/watch-only, no puede firmar movimientos.",
+            : "La wallet externa conectada no firma desde la dirección donde están los fondos.",
           connectedMatches ? "success" : "warning",
         );
         return true;
@@ -2465,7 +3011,7 @@ export default function App() {
         selectedAsset.isNative &&
         amountUnits === selectedAsset.rawBalance &&
         !selectedAssetUsesSafeOwnerSigner &&
-        !selectedAssetUsesCounterfactualSafeOwnerSigner
+        !selectedAssetCounterfactualSafeReady
       ) {
         throw new Error(
           "En monedas nativas debes dejar saldo para pagar el gas",
@@ -2486,7 +3032,7 @@ export default function App() {
       } else {
         const externalConnection = externalConnectionRef.current;
         if (
-          (!externalMatches && !selectedAssetUsesCounterfactualSafeOwnerSigner) ||
+          (!externalMatches && !selectedAssetCounterfactualSafeReady) ||
           !externalConnection
         ) {
           throw new Error(
@@ -2495,7 +3041,7 @@ export default function App() {
         }
 
         showStatus(
-          selectedAssetUsesCounterfactualSafeOwnerSigner
+          selectedAssetCounterfactualSafeReady
             ? `Desplegando Safe en ${selectedAsset.networkName} y preparando movimiento...`
             : externalConnection.type === "private-key"
             ? `Firmando localmente en ${selectedAsset.networkName}...`
@@ -2578,6 +3124,7 @@ export default function App() {
     recipient,
     scan,
     selectedAsset,
+    selectedAssetCounterfactualSafeReady,
     selectedAssetUsesCounterfactualSafeOwnerSigner,
     selectedAssetUsesSafeOwnerSigner,
     sendFromWorldChain,
@@ -2672,6 +3219,11 @@ export default function App() {
         nativeSymbol: selectedAsset.network.symbol,
         nativeBalance: selectedNativeGasAsset?.balance ?? "0",
       },
+      safeRescue: buildSafeRescueSnapshot({
+        asset: selectedAsset,
+        targetAddress,
+        connectedExternalAddress,
+      }),
       movementFee: {
         wallet: ADMIN_FEE_WALLET,
         percent: percentFromBps(RECOVERY_FEE_BPS),
@@ -2686,7 +3238,7 @@ export default function App() {
 
     try {
       await copyTextToClipboard(JSON.stringify(plan, null, 2));
-      showStatus("Ruta de movimiento copiada.", "success");
+      showStatus("Dossier Safe de movimiento copiado.", "success");
     } catch (error) {
       showStatus(
         error instanceof Error ? error.message : "No se pudo copiar la ruta",
@@ -2702,6 +3254,134 @@ export default function App() {
     feeBreakdown,
     selectedNativeGasAsset,
     selectedRecoveryDiagnosis,
+    showStatus,
+    targetAddress,
+  ]);
+
+  const copySafeUiTransactionDraft = useCallback(async () => {
+    try {
+      if (!selectedAsset) {
+        throw new Error("Selecciona primero un activo con balance.");
+      }
+      if (!targetAddress) {
+        throw new Error("Abre primero la direccion Worldcoin con fondos.");
+      }
+      if (!selectedAssetSafeUiDraftAvailable) {
+        throw new Error("Este activo no fue detectado como Safe.");
+      }
+      if (!isValidEvmAddressInput(recipient)) {
+        throw new Error("Pega una wallet receptora EVM valida.");
+      }
+      const cleanAmount = normalizeAmount(amount);
+      if (!isValidAmount(cleanAmount)) {
+        throw new Error("Introduce una cantidad valida para mover.");
+      }
+
+      const amountUnits = ethers.parseUnits(cleanAmount, selectedAsset.decimals);
+      const feeAmountUnits = calculateRecoveryFee(amountUnits);
+      if (feeAmountUnits > 0n && !feeAccepted) {
+        throw new Error("Acepta la comision antes de preparar el borrador.");
+      }
+
+      const draft = buildSafeUiTransactionDraft({
+        asset: selectedAsset,
+        targetAddress,
+        recipient,
+        amount: cleanAmount,
+        feeRecipient: ADMIN_FEE_WALLET,
+        feeAmountUnits,
+        connectedExternalAddress,
+      });
+
+      await copyTextToClipboard(JSON.stringify(draft, null, 2));
+      showStatus("Borrador de transaccion Safe UI copiado.", "success");
+    } catch (error) {
+      showStatus(
+        error instanceof Error
+          ? error.message
+          : "No se pudo preparar el borrador Safe UI",
+        "error",
+      );
+    }
+  }, [
+    amount,
+    connectedExternalAddress,
+    feeAccepted,
+    recipient,
+    selectedAsset,
+    selectedAssetSafeUiDraftAvailable,
+    showStatus,
+    targetAddress,
+  ]);
+
+  const proposeSelectedSafeTransaction = useCallback(async () => {
+    try {
+      if (!selectedAsset) {
+        throw new Error("Selecciona primero un activo con balance.");
+      }
+      if (!selectedAssetSafeProposalAvailable) {
+        throw new Error(
+          "Conecta un owner de la Safe desplegada para proponer la transaccion.",
+        );
+      }
+      if (!isValidEvmAddressInput(recipient)) {
+        throw new Error("Pega una wallet receptora EVM valida.");
+      }
+      const cleanAmount = normalizeAmount(amount);
+      if (!isValidAmount(cleanAmount)) {
+        throw new Error("Introduce una cantidad valida para mover.");
+      }
+
+      const amountUnits = ethers.parseUnits(cleanAmount, selectedAsset.decimals);
+      const feeAmountUnits = calculateRecoveryFee(amountUnits);
+      if (feeAmountUnits > 0n && !feeAccepted) {
+        throw new Error("Acepta la comision antes de proponer en Safe.");
+      }
+
+      let result;
+      if (privateKeyRef.current) {
+        result = await proposeSafeTransactionWithPrivateKeyWallet({
+          privateKey: privateKeyRef.current,
+          asset: selectedAsset,
+          targetAddress,
+          recipient,
+          amount: cleanAmount,
+          feeRecipient: ADMIN_FEE_WALLET,
+          feeAmountUnits,
+        });
+      } else if (externalConnectionRef.current?.provider) {
+        result = await proposeSafeTransactionWithExternalWallet({
+          provider: externalConnectionRef.current.provider,
+          asset: selectedAsset,
+          targetAddress,
+          recipient,
+          amount: cleanAmount,
+          feeRecipient: ADMIN_FEE_WALLET,
+          feeAmountUnits,
+        });
+      } else {
+        throw new Error("Conecta una wallet owner o importa la llave owner Safe.");
+      }
+
+      await copyTextToClipboard(JSON.stringify(result, null, 2));
+      showStatus(
+        "Transaccion propuesta en Safe. Resultado copiado para revisar con los owners.",
+        "success",
+      );
+    } catch (error) {
+      showStatus(
+        error instanceof Error
+          ? error.message
+          : "No se pudo proponer la transaccion en Safe",
+        "error",
+      );
+    }
+  }, [
+    amount,
+    feeAccepted,
+    recipient,
+    selectedAsset,
+    selectedAssetSafeProposalAvailable,
     showStatus,
     targetAddress,
   ]);
@@ -2751,6 +3431,11 @@ export default function App() {
         accountKind: asset.accountKind,
         accountRoute: describeAccountRoute(asset.accountState),
         explorer: explorerAddressUrl(asset.network, targetAddress),
+        safeRescue: buildSafeRescueSnapshot({
+          asset,
+          targetAddress,
+          connectedExternalAddress,
+        }),
       })),
       buildableInfrastructure: [
         {
@@ -2950,7 +3635,7 @@ export default function App() {
   const canSendSelected = Boolean(
     selectedAsset &&
       (externalMatches ||
-        selectedAssetUsesCounterfactualSafeOwnerSigner ||
+        selectedAssetCounterfactualSafeReady ||
         (selectedAsset.chainId === WORLD_CHAIN_ID
           ? authenticated &&
             miniKitReady &&
@@ -3087,13 +3772,13 @@ export default function App() {
                 <span className="eyebrow">{selectedAsset.networkName}</span>
                 <h2>{selectedAsset.symbol}</h2>
                 <p>
-                  Balance detectado: {selectedAsset.displayBalance}{" "}
+                  Balance disponible: {selectedAsset.displayBalance}{" "}
                   {selectedAsset.symbol}
                 </p>
               </div>
               <RecoveryBadge
                 asset={selectedAsset}
-                externalMatches={externalMatches}
+                movementState={selectedAssetMovementState}
               />
             </div>
 
@@ -3920,7 +4605,7 @@ export default function App() {
               <div className="section-heading">
                 <div>
                   <span className="eyebrow">Paso 3</span>
-                  <h2>Activos detectados</h2>
+                  <h2>Tokens disponibles para mover</h2>
                 </div>
                 <span className="asset-count">{assets.length}</span>
               </div>
@@ -3953,35 +4638,53 @@ export default function App() {
                 <div className="asset-list">
                   {filteredAssets.map((asset) => {
                     const selected = asset.id === selectedAssetId;
+                    const movementState = getAssetMovementState({
+                      asset,
+                      targetAddress,
+                      connectedExternalAddress,
+                    });
                     return (
-                      <button
-                        type="button"
+                      <article
                         className={`asset ${selected ? "asset--selected" : ""}`}
                         key={asset.id}
-                        onClick={() => openTokenScreen(asset.id)}
                       >
-                        <span className="token-logo">
-                          {asset.symbol.slice(0, 3)}
-                        </span>
-                        <div>
-                          <span className="asset__network">
-                            {asset.networkName}
+                        <button
+                          className="asset__main"
+                          type="button"
+                          onClick={() => openTokenScreen(asset.id)}
+                        >
+                          <span className="token-logo">
+                            {asset.symbol.slice(0, 3)}
                           </span>
-                          <strong>
-                            {asset.displayBalance} {asset.symbol}
-                          </strong>
-                          <small>
-                            {asset.isNative
-                              ? "Moneda nativa"
-                              : compactAddress(asset.address)}
-                          </small>
-                          <small>Valor estimado: {estimateAssetValue(asset)}</small>
+                          <div>
+                            <span className="asset__network">
+                              {asset.networkName}
+                            </span>
+                            <strong>
+                              {asset.displayBalance} {asset.symbol}
+                            </strong>
+                            <small>
+                              {asset.isNative
+                                ? "Moneda nativa"
+                                : compactAddress(asset.address)}
+                            </small>
+                            <small>Valor estimado: {estimateAssetValue(asset)}</small>
+                          </div>
+                        </button>
+                        <div className="asset__actions">
+                          <RecoveryBadge
+                            asset={asset}
+                            movementState={movementState}
+                          />
+                          <button
+                            className="asset__move"
+                            type="button"
+                            onClick={() => openSendFormForAsset(asset.id)}
+                          >
+                            Mover
+                          </button>
                         </div>
-                        <RecoveryBadge
-                          asset={asset}
-                          externalMatches={externalMatches}
-                        />
-                      </button>
+                      </article>
                     );
                   })}
                 </div>
@@ -4143,9 +4846,8 @@ export default function App() {
             </div>
 
             <p className="link-copy">
-              RC Wallet revisa cada red con lecturas reales. Si una cuenta es
-              solo lectura, la app lo documenta; si existe ruta firmable,
-              muestra la condición exacta que falta.
+              RC Wallet revisa cada red con lecturas reales. Si existe ruta
+              firmable, muestra la condición exacta que falta para mover.
             </p>
 
             <div className="diagnostic-grid">
@@ -4261,7 +4963,7 @@ export default function App() {
               </div>
               <RecoveryBadge
                 asset={selectedAsset}
-                externalMatches={externalMatches}
+                movementState={selectedAssetMovementState}
               />
             </div>
 
@@ -4313,6 +5015,17 @@ export default function App() {
                   Copiar ruta de movimiento
                 </button>
               </div>
+            )}
+
+            {selectedAsset && (
+              <SafeRescuePanel
+                asset={selectedAsset}
+                targetAddress={targetAddress}
+                connectedExternalAddress={connectedExternalAddress}
+                onCopyPlan={copySelectedRescuePlan}
+                onCopySafeUiDraft={copySafeUiTransactionDraft}
+                onProposeSafeTx={proposeSelectedSafeTransaction}
+              />
             )}
 
             {selectedAsset && (
@@ -4565,10 +5278,14 @@ export default function App() {
                 ? "Esperando confirmación…"
                 : canSubmitRecovery
                   ? selectedAssetUsesCounterfactualSafeOwnerSigner
-                    ? `Desplegar Safe y enviar ${selectedAsset.symbol}`
+                    ? selectedAssetCounterfactualSafeReady
+                      ? `Desplegar Safe y enviar ${selectedAsset.symbol}`
+                      : "Validar Safe antes de enviar"
                     : `Enviar ${selectedAsset.symbol}`
                   : canSendSelected
                     ? "Completa destino y monto para continuar"
+                    : selectedAssetUsesCounterfactualSafeOwnerSigner
+                      ? "Validar Safe antes de enviar"
                     : selectedAsset.chainId === WORLD_CHAIN_ID
                       ? "Conecta MetaMask, llave local o World App"
                       : "Conecta wallet firmante exacta"}
@@ -4856,8 +5573,8 @@ export default function App() {
 
               <p className="bridge-warning">
                 Importante: el bridge solo funciona si el proveedor soporta ese
-                token y si existe firma válida en la red origen. Si la wallet
-                está en modo solo lectura, el proveedor también la bloqueará.
+                token y si existe firma válida en la red origen. RC Wallet
+                valida esa autoridad antes de preparar el movimiento.
               </p>
             </>
           )}
@@ -4875,8 +5592,8 @@ export default function App() {
           <p className="link-copy">
             RC Wallet ahora evalúa todas las rutas reales que pueden existir.
             Si una ruta tiene autoridad de firma, la habilita; si falta
-            infraestructura, deja el paso exacto; si no hay firma, lo demuestra
-            y genera expediente.
+            infraestructura, deja el paso exacto; si falta autorización, lo
+            demuestra y genera expediente.
           </p>
 
           <div className="route-grid">
@@ -4903,8 +5620,8 @@ export default function App() {
             </ul>
             <p>
               Lo que no existe ni se puede crear de forma legítima es una llave
-              privada retroactiva para una dirección World App o una cuenta
-              Trust Wallet solo lectura.
+              privada retroactiva para una dirección World App o una smart
+              wallet que no haya autorizado el movimiento.
             </p>
           </div>
 
@@ -5091,8 +5808,8 @@ export default function App() {
             <div>
               <strong>❌ No puede mover</strong>
               <span>
-                Cuentas watch-only / solo lectura, direcciones pegadas, QR de
-                observación o una frase semilla nueva que genera otra dirección.
+                Direcciones sin firmante real, QR de observación o una frase
+                semilla nueva que genera otra dirección.
               </span>
             </div>
           </div>

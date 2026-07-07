@@ -147,7 +147,7 @@ async function refreshSafeAccountState(provider, asset, owner) {
     const hasCode = Boolean(code && code !== "0x");
     const [safe, counterfactualSafe] = await Promise.all([
       inspectSafeAccount(provider, owner, hasCode),
-      inspectCounterfactualSafeMirror(asset.network, owner, hasCode),
+      inspectCounterfactualSafeMirror(provider, asset.network, owner, hasCode),
     ]);
 
     return {
@@ -890,7 +890,7 @@ function safeSameAddressForCore(left, right) {
   }
 }
 
-async function inspectCounterfactualSafeMirror(network, owner, hasCode) {
+async function inspectCounterfactualSafeMirror(provider, network, owner, hasCode) {
   if (hasCode || network.chainId === WORLD_CHAIN_ID) {
     return {
       checked: false,
@@ -1045,7 +1045,7 @@ async function inspectAccount(provider, network, owner, accountCode, nativeBalan
     inspectSafeAccount(provider, owner, hasCode),
     inspectErc1271(provider, owner, hasCode),
     inspectEntryPoints(provider),
-    inspectCounterfactualSafeMirror(network, owner, hasCode),
+    inspectCounterfactualSafeMirror(provider, network, owner, hasCode),
   ]);
 
   const entryPointAvailable = entryPoints.some((entryPoint) =>
@@ -1495,6 +1495,83 @@ function buildSingleSafeTransaction(asset, transfer) {
   };
 }
 
+export function buildSafeUiTransactionDraft({
+  asset,
+  targetAddress,
+  recipient,
+  amount,
+  feeRecipient,
+  feeAmountUnits = 0n,
+  connectedExternalAddress,
+}) {
+  const transfer = prepareTransfer({
+    asset,
+    targetAddress,
+    recipient,
+    amount,
+    feeRecipient,
+    feeAmountUnits,
+  });
+  const transactions = transfer.txRequests.map((transaction) => ({
+    to: normalizeAddress(transaction.to),
+    value: BigInt(transaction.value ?? 0n).toString(),
+    data: transaction.data ?? "0x",
+    operation: SAFE_OPERATION_CALL,
+  }));
+
+  return {
+    format: "rc-wallet-safe-ui-transaction-draft",
+    version: 1,
+    createdAt: new Date().toISOString(),
+    safeAddress: transfer.owner,
+    signerAddress: connectedExternalAddress
+      ? normalizeAddress(connectedExternalAddress)
+      : null,
+    chainId: asset.chainId,
+    network: asset.networkName,
+    asset: {
+      symbol: asset.symbol,
+      tokenAddress: asset.address,
+      isNative: asset.isNative,
+      decimals: asset.decimals,
+      amountUnits: transfer.amountUnits.toString(),
+      recipientAmountUnits: transfer.recipientAmountUnits.toString(),
+      feeUnits: transfer.feeUnits.toString(),
+    },
+    transactions,
+    safeAppsSdk: {
+      txs: transactions.map((transaction) => ({
+        to: transaction.to,
+        value: transaction.value,
+        data: transaction.data,
+      })),
+    },
+    transactionBuilder: {
+      version: "1.0",
+      chainId: String(asset.chainId),
+      createdAt: Date.now(),
+      meta: {
+        name: `RC Wallet rescue ${asset.symbol}`,
+        description:
+          "Borrador generado por RC Wallet External para revisar, firmar y ejecutar desde Safe UI cuando la Safe requiere owners.",
+        createdFromSafeAddress: transfer.owner,
+        createdFromOwnerAddress: connectedExternalAddress
+          ? normalizeAddress(connectedExternalAddress)
+          : "",
+      },
+      transactions: transactions.map((transaction) => ({
+        to: transaction.to,
+        value: transaction.value,
+        data: transaction.data,
+        contractMethod: null,
+        contractInputsValues: null,
+      })),
+    },
+    review:
+      "Verifica en Safe UI que la red, Safe, destino, token, monto y owners coinciden antes de firmar.",
+  };
+}
+
 async function assertCanPaySafeExecutionCosts({
   provider,
   signerAddress,
@@ -1660,6 +1737,320 @@ async function signSafeTransaction({
   }
 
   return signature;
+}
+
+function safeTransactionServiceUrl(chainId) {
+  const serviceUrl = SAFE_CREATION_SERVICE_URLS[Number(chainId)]?.[0];
+  if (!serviceUrl) {
+    throw new Error(
+      "Esta red no tiene Safe Transaction Service configurado para proponer transacciones",
+    );
+  }
+  return serviceUrl.replace(/\/+$/, "");
+}
+
+async function postSafeTransactionProposal({ chainId, safeAddress, payload }) {
+  let proxiedProposal = null;
+
+  try {
+    proxiedProposal = await postSafeTransactionProposalViaRcApi({
+      chainId,
+      safeAddress,
+      payload,
+    });
+  } catch (error) {
+    if (isRcSafeProposalRejection(error)) throw error;
+    console.warn("[RC Wallet] Safe proposal API fallback", error);
+  }
+
+  if (proxiedProposal) return proxiedProposal;
+
+  const serviceUrl = safeTransactionServiceUrl(chainId);
+  const url = `${serviceUrl}/api/v1/safes/${safeAddress}/multisig-transactions/`;
+  const response = await timeout(
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
+    20_000,
+    "Safe Transaction Service",
+  );
+  const responseBody = await readSafeProposalResponse(response);
+
+  if (!response.ok) {
+    throw new Error(
+      `Safe Transaction Service rechazo la propuesta (${response.status}). ${formatSafeProposalDetail(
+        responseBody,
+      )}`,
+    );
+  }
+
+  return {
+    url,
+    status: response.status,
+    response: responseBody,
+    via: "safe-transaction-service",
+  };
+}
+
+async function postSafeTransactionProposalViaRcApi({
+  chainId,
+  safeAddress,
+  payload,
+}) {
+  if (typeof window === "undefined" || typeof fetch !== "function") {
+    return null;
+  }
+
+  const url = "/api/safe-propose";
+  const response = await timeout(
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ chainId, safeAddress, payload }),
+    }),
+    20_000,
+    "API RC Safe",
+  );
+  const contentType = response.headers?.get?.("content-type") ?? "";
+  const responseBody = await readSafeProposalResponse(response);
+
+  if (contentType.includes("text/html")) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `API RC Safe rechazo la propuesta (${response.status}). ${formatSafeProposalDetail(
+        responseBody,
+      )}`,
+    );
+  }
+
+  return {
+    url,
+    status: response.status,
+    response: responseBody,
+    via: "rc-wallet-api",
+  };
+}
+
+async function readSafeProposalResponse(response) {
+  const text = await response.text().catch(() => "");
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function formatSafeProposalDetail(detail) {
+  if (!detail) return "";
+  if (typeof detail === "string") return detail.slice(0, 240);
+  return JSON.stringify(detail).slice(0, 240);
+}
+
+function isRcSafeProposalRejection(error) {
+  return (
+    error instanceof Error &&
+    error.message.startsWith("API RC Safe rechazo la propuesta")
+  );
+}
+
+async function buildSignedSafeProposal({
+  provider,
+  signer,
+  signerAddress,
+  asset,
+  targetAddress,
+  recipient,
+  amount,
+  feeRecipient,
+  feeAmountUnits,
+}) {
+  const transfer = prepareTransfer({
+    asset,
+    targetAddress,
+    recipient,
+    amount,
+    feeRecipient,
+    feeAmountUnits,
+  });
+  const refreshedAccountState = await refreshSafeAccountState(
+    provider,
+    asset,
+    transfer.owner,
+  );
+
+  if (!refreshedAccountState.safe?.detected) {
+    throw new Error(
+      "La propuesta Safe UI solo aplica cuando la Safe ya esta desplegada en esta red",
+    );
+  }
+  if (!safeOwnersInclude(refreshedAccountState, signerAddress)) {
+    throw new Error(
+      "La wallet conectada no aparece como owner de la Safe en esta red",
+    );
+  }
+
+  const safeAddress = transfer.owner;
+  const safeContract = new ethers.Contract(
+    safeAddress,
+    SAFE_INTROSPECTION_ABI,
+    signer,
+  );
+  const safeTx = buildSingleSafeTransaction(asset, transfer);
+  const safeTxGas = 0n;
+  const baseGas = 0n;
+  const gasPrice = 0n;
+  const gasToken = ethers.ZeroAddress;
+  const refundReceiver = ethers.ZeroAddress;
+  const nonce = await timeout(safeContract.nonce(), 7_000, "Safe nonce");
+  const safeTxHash = await timeout(
+    safeContract.getTransactionHash(
+      safeTx.to,
+      safeTx.value,
+      safeTx.data,
+      safeTx.operation,
+      safeTxGas,
+      baseGas,
+      gasPrice,
+      gasToken,
+      refundReceiver,
+      nonce,
+    ),
+    7_000,
+    "Safe transaction hash",
+  );
+  const signature = await signSafeTransaction({
+    provider,
+    signer,
+    signerAddress,
+    safeAddress,
+    safeTx,
+    safeTxGas,
+    baseGas,
+    gasPrice,
+    gasToken,
+    refundReceiver,
+    nonce,
+    safeTxHash,
+  });
+  const payload = {
+    safe: safeAddress,
+    to: safeTx.to,
+    value: safeTx.value.toString(),
+    data: safeTx.data,
+    operation: safeTx.operation,
+    safeTxGas: safeTxGas.toString(),
+    baseGas: baseGas.toString(),
+    gasPrice: gasPrice.toString(),
+    gasToken,
+    refundReceiver,
+    nonce: Number(nonce),
+    contractTransactionHash: safeTxHash,
+    sender: signerAddress,
+    signature,
+    origin: "RC Wallet External",
+  };
+
+  return {
+    safeAddress,
+    safeTx: {
+      to: safeTx.to,
+      value: safeTx.value.toString(),
+      data: safeTx.data,
+      operation: safeTx.operation,
+    },
+    safeTxHash,
+    payload,
+    signature,
+    signerAddress,
+    accountState: refreshedAccountState,
+  };
+}
+
+export async function proposeSafeTransactionWithExternalWallet({
+  provider,
+  asset,
+  targetAddress,
+  recipient,
+  amount,
+  feeRecipient,
+  feeAmountUnits = 0n,
+}) {
+  if (!provider?.request) {
+    throw new Error("La conexion externa no expone un proveedor EIP-1193");
+  }
+
+  await switchExternalNetwork(provider, asset.network);
+  const browserProvider = new ethers.BrowserProvider(provider);
+  const signer = await browserProvider.getSigner();
+  const signerAddress = normalizeAddress(await signer.getAddress());
+  const signedProposal = await buildSignedSafeProposal({
+    provider: browserProvider,
+    signer,
+    signerAddress,
+    asset,
+    targetAddress,
+    recipient,
+    amount,
+    feeRecipient,
+    feeAmountUnits,
+  });
+  const proposal = await postSafeTransactionProposal({
+    chainId: asset.chainId,
+    safeAddress: signedProposal.safeAddress,
+    payload: signedProposal.payload,
+  });
+
+  return {
+    route: "safe-service-proposal-external",
+    ...signedProposal,
+    proposal,
+  };
+}
+
+export async function proposeSafeTransactionWithPrivateKeyWallet({
+  privateKey,
+  asset,
+  targetAddress,
+  recipient,
+  amount,
+  feeRecipient,
+  feeAmountUnits = 0n,
+}) {
+  const provider = await getProvider(asset.network);
+  const signer = new ethers.Wallet(normalizePrivateKey(privateKey), provider);
+  const signerAddress = normalizeAddress(signer.address);
+  const signedProposal = await buildSignedSafeProposal({
+    provider,
+    signer,
+    signerAddress,
+    asset,
+    targetAddress,
+    recipient,
+    amount,
+    feeRecipient,
+    feeAmountUnits,
+  });
+  const proposal = await postSafeTransactionProposal({
+    chainId: asset.chainId,
+    safeAddress: signedProposal.safeAddress,
+    payload: signedProposal.payload,
+  });
+
+  return {
+    route: "safe-service-proposal-private-key",
+    ...signedProposal,
+    proposal,
+  };
 }
 
 async function sendWithSafeOwnerSigner({
