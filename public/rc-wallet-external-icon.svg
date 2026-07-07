@@ -1,15 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">RC Wallet External</title>
+  <desc id="desc">Icono de RC Wallet External para importar direccion Worldcoin.</desc>
   <defs>
-    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
-      <stop stop-color="#2563eb"/>
-      <stop offset="0.48" stop-color="#0ea5e9"/>
-      <stop offset="1" stop-color="#f0b90b"/>
+    <linearGradient id="bg" x1="16" y1="12" x2="112" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#35a2ff"/>
+      <stop offset="0.56" stop-color="#1d62d8"/>
+      <stop offset="1" stop-color="#0b2f7f"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="38" y1="38" x2="104" y2="104" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffe082"/>
+      <stop offset="1" stop-color="#f3ad00"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="118" fill="#070a0e"/>
-  <rect x="54" y="76" width="404" height="320" rx="58" fill="url(#g)" opacity="0.95"/>
-  <rect x="86" y="118" width="340" height="236" rx="42" fill="#101823"/>
-  <path d="M132 292V174h54c31 0 53 18 53 47 0 19-10 34-27 42l34 29h-47l-27-24h-2v24h-38Zm38-56h17c10 0 16-5 16-14s-6-14-16-14h-17v28Zm104 58c-36 0-62-26-62-61s26-61 63-61c24 0 45 12 55 31l-33 17c-4-8-12-13-22-13-15 0-25 11-25 26 0 16 10 27 25 27 10 0 18-5 22-14l34 16c-10 20-31 32-57 32Z" fill="#fff"/>
-  <circle cx="378" cy="274" r="38" fill="#f0b90b"/>
-  <path d="M378 248v52m-26-26h52" stroke="#111827" stroke-width="18" stroke-linecap="round"/>
+  <rect width="128" height="128" rx="28" fill="#070a0e"/>
+  <rect x="10" y="10" width="108" height="108" rx="24" fill="url(#bg)"/>
+  <path d="M38 45h38c13 0 23 10 23 23s-10 23-23 23H38V45Z" fill="#071225" opacity="0.52"/>
+  <path d="M76 51h22a12 12 0 0 1 12 12v10a12 12 0 0 1-12 12H76a17 17 0 0 1 0-34Z" fill="url(#gold)"/>
+  <circle cx="94" cy="68" r="5" fill="#071225"/>
+  <text x="43" y="78" fill="#fff" font-family="Arial, sans-serif" font-size="34" font-weight="800">RC</text>
 </svg>
