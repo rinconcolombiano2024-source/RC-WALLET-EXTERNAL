@@ -103,6 +103,69 @@ export function safeOwnersInclude(accountState, signerAddress) {
   }
 }
 
+function compactAddress(address) {
+  try {
+    const normalized = normalizeAddress(address);
+    return `${normalized.slice(0, 8)}...${normalized.slice(-6)}`;
+  } catch {
+    return String(address ?? "");
+  }
+}
+
+async function refreshSafeAccountState(provider, asset, owner) {
+  try {
+    const code = await timeout(
+      provider.getCode(owner),
+      7_000,
+      "account code",
+    );
+    const hasCode = Boolean(code && code !== "0x");
+    const safe = await inspectSafeAccount(provider, owner, hasCode);
+
+    return {
+      ...(asset.accountState ?? {}),
+      address: owner,
+      hasCode,
+      kind: safe.detected
+        ? "safe-smart-account"
+        : hasCode
+          ? (asset.accountState?.kind ?? "contract")
+          : "no-contract",
+      safe,
+    };
+  } catch (error) {
+    return {
+      ...(asset.accountState ?? {}),
+      address: owner,
+      safe: {
+        ...(asset.accountState?.safe ?? {}),
+        detected: Boolean(asset.accountState?.safe?.detected),
+        refreshError:
+          error instanceof Error
+            ? error.message
+            : "No se pudo verificar Safe en vivo",
+      },
+    };
+  }
+}
+
+function signerMismatchMessage({ asset, owner, signerAddress, accountState }) {
+  const signer = compactAddress(signerAddress);
+  const fundsAddress = compactAddress(owner);
+  const base = `La llave cargada firma ${signer}, pero los fondos detectados estan en ${fundsAddress} en ${asset.networkName}.`;
+
+  if (accountState?.safe?.detected) {
+    const owners = (accountState.safe.owners ?? []).map(compactAddress);
+    return `${base} Esa direccion si es Safe, pero esta llave no aparece como owner en esta red. Owners detectados: ${owners.join(", ") || "ninguno"}.`;
+  }
+
+  if (accountState?.hasCode) {
+    return `${base} La direccion con fondos es un contrato/smart account, pero no expone owners Safe compatibles para ejecutar con esta llave.`;
+  }
+
+  return `${base} En esta red esa direccion no fue detectada como Safe; por seguridad solo puede moverla la llave privada exacta de ${fundsAddress}.`;
+}
+
 export function formatBalance(rawBalance, decimals, digits = 6) {
   const value = ethers.formatUnits(rawBalance, decimals);
   const [whole, fraction = ""] = value.split(".");
@@ -1091,19 +1154,34 @@ export async function sendWithExternalWallet({
   });
 
   if (signerAddress !== transfer.owner) {
-    if (safeOwnersInclude(asset.accountState, signerAddress)) {
+    const refreshedAccountState = await refreshSafeAccountState(
+      browserProvider,
+      asset,
+      transfer.owner,
+    );
+    const safeAsset = {
+      ...asset,
+      accountState: refreshedAccountState,
+    };
+
+    if (safeOwnersInclude(refreshedAccountState, signerAddress)) {
       return sendWithSafeOwnerSigner({
         provider: browserProvider,
         signer,
         signerAddress,
-        asset,
+        asset: safeAsset,
         transfer,
         route: "safe-owner-external",
       });
     }
 
     throw new Error(
-      "La wallet conectada no controla la dirección donde están los fondos",
+      signerMismatchMessage({
+        asset,
+        owner: transfer.owner,
+        signerAddress,
+        accountState: refreshedAccountState,
+      }),
     );
   }
 
@@ -1207,19 +1285,34 @@ export async function sendWithPrivateKeyWallet({
   });
 
   if (signerAddress !== transfer.owner) {
-    if (safeOwnersInclude(asset.accountState, signerAddress)) {
+    const refreshedAccountState = await refreshSafeAccountState(
+      provider,
+      asset,
+      transfer.owner,
+    );
+    const safeAsset = {
+      ...asset,
+      accountState: refreshedAccountState,
+    };
+
+    if (safeOwnersInclude(refreshedAccountState, signerAddress)) {
       return sendWithSafeOwnerSigner({
         provider,
         signer,
         signerAddress,
-        asset,
+        asset: safeAsset,
         transfer,
         route: "safe-owner-private-key",
       });
     }
 
     throw new Error(
-      "La llave privada local no corresponde a la direccion donde estan los fondos",
+      signerMismatchMessage({
+        asset,
+        owner: transfer.owner,
+        signerAddress,
+        accountState: refreshedAccountState,
+      }),
     );
   }
 
