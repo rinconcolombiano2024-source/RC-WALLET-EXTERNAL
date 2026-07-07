@@ -4246,17 +4246,6 @@ export default function App() {
                     : "Conecta un proveedor externo. La transferencia solo se habilita si ese proveedor expone exactamente "}
                   <code>{compactAddress(targetAddress)}</code>.
                 </p>
-                <div className="watch-only-box">
-                  <strong>Trust Wallet “solo lectura” no puede firmar</strong>
-                  <p>
-                    Ver los fondos en Trust Wallet no significa poder moverlos.
-                    Si la cuenta fue agregada con una dirección pública, World
-                    ID, QR o modo observar, Trust Wallet solo puede leer el
-                    balance. Para enviar debe existir una llave privada, frase
-                    semilla o smart account compatible que firme esa misma
-                    dirección.
-                  </p>
-                </div>
                 <div className="local-key-box">
                   <strong>Importar dirección Worldcoin</strong>
                   <p>

@@ -1126,27 +1126,6 @@ summary:focus-visible {
   color: #fff;
 }
 
-.watch-only-box {
-  margin: 10px 0;
-  border: 1px solid #74424b;
-  border-radius: 12px;
-  padding: 11px;
-  background: #261319;
-  color: #ffc5cf;
-}
-
-.watch-only-box strong {
-  display: block;
-  margin-bottom: 5px;
-  color: #ff9aaa;
-}
-
-.watch-only-box p {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.55;
-}
-
 .local-key-box {
   display: grid;
   gap: 9px;
