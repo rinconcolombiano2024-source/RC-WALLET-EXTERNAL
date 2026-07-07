@@ -4,6 +4,8 @@ import {
   ERC20_ABI,
   ERC4337_ENTRYPOINTS,
   NETWORKS,
+  SAFE_CLIENT_GATEWAY_URL,
+  SAFE_CREATION_SERVICE_URLS,
   SAFE_FACTORY_CANDIDATES,
   SAFE_INTROSPECTION_ABI,
   SAFE_PROXY_FACTORY_ABI,
@@ -596,6 +598,207 @@ function parseSafeFactoryTransaction(transaction) {
   };
 }
 
+async function fetchJsonWithTimeout(url, milliseconds, label) {
+  if (typeof fetch !== "function") {
+    throw new Error("fetch no disponible");
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), milliseconds);
+
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`${label}: ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function normalizeSafeCreationPayload(payload, sourceUrl) {
+  const data =
+    payload?.creation ??
+    payload?.data ??
+    payload?.results?.[0] ??
+    payload;
+  if (!data || typeof data !== "object") return null;
+
+  const transactionHash =
+    data.transactionHash ??
+    data.transaction_hash ??
+    data.txHash ??
+    data.tx_hash ??
+    data.creationTxHash ??
+    data.transaction?.txHash ??
+    data.transaction?.hash ??
+    null;
+  const factory =
+    data.factoryAddress ??
+    data.factory_address ??
+    data.factory ??
+    data.createdBy ??
+    null;
+  const singleton =
+    data.masterCopy ??
+    data.master_copy ??
+    data.singleton ??
+    data.implementation ??
+    null;
+  const initializer =
+    data.setupData ??
+    data.setup_data ??
+    data.initializer ??
+    data.initData ??
+    null;
+  const saltNonce =
+    data.saltNonce ??
+    data.salt_nonce ??
+    data.salt ??
+    null;
+
+  if (!transactionHash && !factory && !singleton && !initializer) {
+    return null;
+  }
+
+  return {
+    sourceUrl,
+    transactionHash,
+    factory: factory && ethers.isAddress(factory) ? normalizeAddress(factory) : null,
+    singleton:
+      singleton && ethers.isAddress(singleton) ? normalizeAddress(singleton) : null,
+    initializer:
+      typeof initializer === "string" && ethers.isHexString(initializer)
+        ? initializer
+        : null,
+    saltNonce:
+      saltNonce !== null && saltNonce !== undefined
+        ? BigInt(saltNonce).toString()
+        : null,
+  };
+}
+
+async function readSafeCreationFromService(chainId, safeAddress) {
+  const serviceUrls = SAFE_CREATION_SERVICE_URLS[chainId] ?? [];
+  const urls = [
+    `/api/safe-creation?chainId=${chainId}&safe=${safeAddress}`,
+    ...serviceUrls.map(
+      (baseUrl) => `${baseUrl}/api/v1/safes/${safeAddress}/creation/`,
+    ),
+    `${SAFE_CLIENT_GATEWAY_URL}/v1/chains/${chainId}/safes/${safeAddress}/creation`,
+    `${SAFE_CLIENT_GATEWAY_URL}/v1/chains/${chainId}/safes/${safeAddress}`,
+  ];
+  const errors = [];
+
+  for (const url of urls) {
+    try {
+      const payload = await fetchJsonWithTimeout(
+        url,
+        8_000,
+        "Safe creation service",
+      );
+      const normalized = normalizeSafeCreationPayload(payload, url);
+      if (normalized) return normalized;
+      errors.push(`${url}: respuesta sin creacion`);
+    } catch (error) {
+      errors.push(
+        `${url}: ${
+          error instanceof Error ? error.message : "consulta fallida"
+        }`,
+      );
+    }
+  }
+
+  return { errors };
+}
+
+async function buildDeploymentFromCreation({
+  provider,
+  safeAddress,
+  creation,
+}) {
+  let parsed = null;
+  let factory = creation.factory;
+
+  if (creation.transactionHash) {
+    const transaction = await timeout(
+      provider.getTransaction(creation.transactionHash),
+      7_000,
+      "Safe creation transaction",
+    );
+    parsed = parseSafeFactoryTransaction(transaction);
+    if (!factory && transaction?.to) {
+      factory = normalizeAddress(transaction.to);
+    }
+  }
+
+  if (!parsed && creation.singleton && creation.initializer && creation.saltNonce) {
+    parsed = {
+      method: "createProxyWithNonce",
+      singleton: creation.singleton,
+      initializer: creation.initializer,
+      saltNonce: creation.saltNonce,
+      callback: null,
+    };
+  }
+
+  if (!parsed || !factory) return null;
+
+  const predictedSourceAddress = await predictSafeProxyAddress({
+    provider,
+    factory,
+    singleton: parsed.singleton,
+    initializer: parsed.initializer,
+    saltNonce: parsed.saltNonce,
+    callback: parsed.callback,
+    method: parsed.method,
+    chainId: WORLD_CHAIN_ID,
+  });
+
+  if (!safeSameAddressForCore(predictedSourceAddress, safeAddress)) {
+    return null;
+  }
+
+  return {
+    ...parsed,
+    factory,
+    factoryVersion: "service",
+    sourceChainId: WORLD_CHAIN_ID,
+    sourceTransactionHash: creation.transactionHash ?? null,
+    sourceUrl: creation.sourceUrl,
+    predictedSourceAddress,
+    canReplayCrossChain:
+      parsed.method !== "createChainSpecificProxyWithNonce",
+  };
+}
+
+async function findSafeDeploymentFromServices(owner, worldProvider) {
+  const creation = await readSafeCreationFromService(WORLD_CHAIN_ID, owner);
+  if (!creation || !("transactionHash" in creation || "factory" in creation)) {
+    return {
+      deployment: null,
+      errors: creation?.errors ?? [],
+    };
+  }
+
+  const deployment = await buildDeploymentFromCreation({
+    provider: worldProvider,
+    safeAddress: owner,
+    creation,
+  });
+
+  return {
+    deployment,
+    errors: deployment ? [] : ["La creacion Safe no predice la direccion origen"],
+  };
+}
+
 async function findSafeDeploymentOnWorldChain(owner) {
   const normalizedOwner = normalizeAddress(owner);
   const cacheKey = normalizedOwner.toLowerCase();
@@ -610,6 +813,18 @@ async function findSafeDeploymentOnWorldChain(owner) {
     if (!worldNetwork) return null;
 
     const worldProvider = await getProvider(worldNetwork);
+    try {
+      const serviceResult = await findSafeDeploymentFromServices(
+        normalizedOwner,
+        worldProvider,
+      );
+      if (serviceResult.deployment) {
+        return serviceResult.deployment;
+      }
+    } catch (error) {
+      console.warn("[SAFE CREATION SERVICE]", error);
+    }
+
     for (const candidate of SAFE_FACTORY_CANDIDATES) {
       const factory = normalizeAddress(candidate.factory);
       const factoryCode = await timeout(

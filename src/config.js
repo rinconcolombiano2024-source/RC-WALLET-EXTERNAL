@@ -34,6 +34,28 @@ export const SAFE_FACTORY_CANDIDATES = Object.freeze([
   },
 ]);
 
+export const SAFE_CREATION_SERVICE_URLS = Object.freeze({
+  1: [
+    "https://safe-transaction-mainnet.safe.global",
+  ],
+  10: [
+    "https://safe-transaction-optimism.safe.global",
+  ],
+  56: [
+    "https://safe-transaction-bsc.safe.global",
+  ],
+  480: [
+    "https://safe-transaction-worldchain.safe.global",
+    "https://safe-transaction-world-chain.safe.global",
+  ],
+  8453: [
+    "https://safe-transaction-base.safe.global",
+  ],
+});
+
+export const SAFE_CLIENT_GATEWAY_URL =
+  "https://safe-client.safe.global";
+
 export const RECOVERY_ROUTE_CATALOG = Object.freeze([
   {
     id: "world-minikit",
