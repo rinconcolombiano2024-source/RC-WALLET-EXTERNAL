@@ -23,7 +23,7 @@ const BPS_DENOMINATOR = 10_000n;
 const GAS_LIMIT_BUFFER_BPS = 12_000n;
 const GAS_PRICE_BUFFER_BPS = 12_000n;
 const SAFE_OPERATION_CALL = 0;
-const SAFE_CREATION_LOG_BATCH_SIZE = 500_000;
+const SAFE_CREATION_LOG_BATCH_SIZE = 250_000;
 const SECP256K1_ORDER =
   0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 const safeDeploymentCache = new Map();
@@ -399,8 +399,39 @@ function uint256ToBytes32(value) {
   return ethers.zeroPadValue(ethers.toBeHex(BigInt(value)), 32);
 }
 
-function createSafeDeploymentSalt(method, initializer, saltNonce, chainId) {
-  const parts = [ethers.keccak256(initializer), uint256ToBytes32(saltNonce)];
+function getSafeEffectiveSaltNonce(method, saltNonce, callback) {
+  if (method !== "createProxyWithCallback") {
+    return BigInt(saltNonce);
+  }
+
+  if (!callback) {
+    throw new Error("Falta el callback usado para crear la Safe original");
+  }
+
+  return BigInt(
+    ethers.solidityPackedKeccak256(
+      ["uint256", "address"],
+      [BigInt(saltNonce), normalizeAddress(callback)],
+    ),
+  );
+}
+
+function createSafeDeploymentSalt({
+  method,
+  initializer,
+  saltNonce,
+  callback,
+  chainId,
+}) {
+  const effectiveSaltNonce = getSafeEffectiveSaltNonce(
+    method,
+    saltNonce,
+    callback,
+  );
+  const parts = [
+    ethers.keccak256(initializer),
+    uint256ToBytes32(effectiveSaltNonce),
+  ];
   if (method === "createChainSpecificProxyWithNonce") {
     parts.push(uint256ToBytes32(chainId));
   }
@@ -413,6 +444,7 @@ async function predictSafeProxyAddress({
   singleton,
   initializer,
   saltNonce,
+  callback,
   method,
   chainId,
 }) {
@@ -434,12 +466,13 @@ async function predictSafeProxyAddress({
       [normalizeAddress(singleton)],
     ),
   ]);
-  const salt = createSafeDeploymentSalt(
+  const salt = createSafeDeploymentSalt({
     method,
     initializer,
     saltNonce,
+    callback,
     chainId,
-  );
+  });
 
   return ethers.getCreate2Address(
     factoryAddress,
@@ -449,23 +482,34 @@ async function predictSafeProxyAddress({
 }
 
 async function getSafeProxyCreationLogs(provider, factory, proxy) {
+  const normalizedProxy = normalizeAddress(proxy);
   const filter = {
     address: normalizeAddress(factory),
     topics: [
       SAFE_PROXY_CREATION_TOPIC,
-      ethers.zeroPadValue(normalizeAddress(proxy), 32),
+      ethers.zeroPadValue(normalizedProxy, 32),
     ],
     fromBlock: 0,
     toBlock: "latest",
   };
 
   try {
-    return await timeout(
+    const indexedLogs = await timeout(
       provider.getLogs(filter),
       12_000,
       "Safe ProxyCreation logs",
     );
+    if (indexedLogs.length) return indexedLogs;
   } catch {
+    // Some RPCs reject wide log ranges; fallback below scans in batches.
+  }
+
+  const topicOnlyFilter = {
+    address: normalizeAddress(factory),
+    topics: [SAFE_PROXY_CREATION_TOPIC],
+  };
+
+  try {
     const latestBlock = await timeout(
       provider.getBlockNumber(),
       7_000,
@@ -480,17 +524,41 @@ async function getSafeProxyCreationLogs(provider, factory, proxy) {
       const fromBlock = Math.max(0, toBlock - SAFE_CREATION_LOG_BATCH_SIZE + 1);
       const batch = await timeout(
         provider.getLogs({
-          ...filter,
+          ...topicOnlyFilter,
           fromBlock,
           toBlock,
         }),
         12_000,
         "Safe ProxyCreation logs batch",
       );
-      logs.push(...batch);
+      logs.push(...batch.filter((log) => safeProxyCreationLogMatches(log, normalizedProxy)));
     }
     return logs;
+  } catch {
+    return [];
   }
+}
+
+function safeProxyCreationLogMatches(log, proxy) {
+  try {
+    const normalizedProxy = normalizeAddress(proxy);
+    if (log.topics?.[1]) {
+      const indexedProxy = normalizeAddress(`0x${log.topics[1].slice(-40)}`);
+      if (indexedProxy === normalizedProxy) return true;
+    }
+
+    if (log.data && log.data !== "0x") {
+      const [decodedProxy] = ethers.AbiCoder.defaultAbiCoder().decode(
+        ["address", "address"],
+        log.data,
+      );
+      return normalizeAddress(decodedProxy) === normalizedProxy;
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
 }
 
 function parseSafeFactoryTransaction(transaction) {
@@ -521,6 +589,10 @@ function parseSafeFactoryTransaction(transaction) {
     singleton: normalizeAddress(parsed.args[0]),
     initializer: String(parsed.args[1]),
     saltNonce: BigInt(parsed.args[2]).toString(),
+    callback:
+      parsed.name === "createProxyWithCallback"
+        ? normalizeAddress(parsed.args[3])
+        : null,
   };
 }
 
@@ -567,6 +639,7 @@ async function findSafeDeploymentOnWorldChain(owner) {
           singleton: parsed.singleton,
           initializer: parsed.initializer,
           saltNonce: parsed.saltNonce,
+          callback: parsed.callback,
           method: parsed.method,
           chainId: WORLD_CHAIN_ID,
         });
@@ -692,6 +765,7 @@ async function inspectCounterfactualSafeMirror(network, owner, hasCode) {
           singleton: deployment.singleton,
           initializer: deployment.initializer,
           saltNonce: deployment.saltNonce,
+          callback: deployment.callback,
           method: deployment.method,
           chainId: network.chainId,
         });
@@ -1565,11 +1639,16 @@ async function deployCounterfactualSafeMirror({
     SAFE_PROXY_FACTORY_ABI,
     signer,
   );
+  const deploySaltNonce = getSafeEffectiveSaltNonce(
+    deployment.method,
+    deployment.saltNonce,
+    deployment.callback,
+  );
   const gasEstimate = await timeout(
     factory.createProxyWithNonce.estimateGas(
       deployment.singleton,
       deployment.initializer,
-      BigInt(deployment.saltNonce),
+      deploySaltNonce,
     ),
     12_000,
     "Safe deployment gas",
@@ -1601,7 +1680,7 @@ async function deployCounterfactualSafeMirror({
   const transaction = await factory.createProxyWithNonce(
     deployment.singleton,
     deployment.initializer,
-    BigInt(deployment.saltNonce),
+    deploySaltNonce,
     { gasLimit },
   );
   const receipt = await transaction.wait(1);
