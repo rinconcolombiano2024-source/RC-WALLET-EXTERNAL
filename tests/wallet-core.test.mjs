@@ -3,6 +3,7 @@ import { Wallet } from "ethers";
 import {
   normalizePrivateKey,
   privateKeyToAddress,
+  safeMirrorOwnersInclude,
   safeOwnersInclude,
 } from "../src/blockchain.js";
 
@@ -25,6 +26,30 @@ assert.equal(
 assert.equal(
   safeOwnersInclude(
     { safe: { detected: true, owners: [knownAddress] } },
+    "0x0000000000000000000000000000000000000001",
+  ),
+  false,
+);
+assert.equal(
+  safeMirrorOwnersInclude(
+    {
+      counterfactualSafe: {
+        detected: true,
+        owners: [knownAddress.toLowerCase()],
+      },
+    },
+    knownAddress,
+  ),
+  true,
+);
+assert.equal(
+  safeMirrorOwnersInclude(
+    {
+      counterfactualSafe: {
+        detected: true,
+        owners: [knownAddress],
+      },
+    },
     "0x0000000000000000000000000000000000000001",
   ),
   false,
