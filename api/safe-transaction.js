@@ -9,11 +9,7 @@ const SAFE_SERVICE_URLS = Object.freeze({
   8453: ["https://safe-transaction-base.safe.global"],
 });
 
-const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const HASH_PATTERN = /^0x[a-fA-F0-9]{64}$/;
-const HEX_PATTERN = /^0x(?:[a-fA-F0-9]{2})*$/;
-const SIGNATURE_PATTERN = /^0x[a-fA-F0-9]{130}$/;
-const UINT_PATTERN = /^(0|[1-9][0-9]*)$/;
 
 function setCors(response) {
   response.setHeader("Access-Control-Allow-Origin", "*");
@@ -30,18 +26,6 @@ function serviceUrl(chainId) {
   return SAFE_SERVICE_URLS[Number(chainId)]?.[0]?.replace(/\/+$/, "") ?? null;
 }
 
-function validAddress(value) {
-  return typeof value === "string" && ADDRESS_PATTERN.test(value);
-}
-
-function validHex(value) {
-  return typeof value === "string" && HEX_PATTERN.test(value);
-}
-
-function validUintString(value) {
-  return typeof value === "string" && UINT_PATTERN.test(value);
-}
-
 function safeApiHeaders() {
   const apiKey =
     process.env.SAFE_API_KEY ||
@@ -50,7 +34,6 @@ function safeApiHeaders() {
     "";
   const headers = {
     accept: "application/json",
-    "content-type": "application/json",
     "user-agent": "RC-Wallet-External/1.0",
   };
 
@@ -61,50 +44,15 @@ function safeApiHeaders() {
   return headers;
 }
 
-function validateSafeProposal({ chainId, safeAddress, payload }) {
+function validateSafeTransactionLookup({ chainId, safeTxHash }) {
   if (!Number.isInteger(Number(chainId))) {
     return "chainId invalido";
   }
   if (!serviceUrl(chainId)) {
     return "Red sin Safe Transaction Service configurado";
   }
-  if (!validAddress(safeAddress)) {
-    return "safeAddress invalida";
-  }
-  if (!payload || typeof payload !== "object") {
-    return "payload invalido";
-  }
-  if (!validAddress(payload.safe) || payload.safe.toLowerCase() !== safeAddress.toLowerCase()) {
-    return "payload.safe no coincide con la Safe";
-  }
-  if (!validAddress(payload.to)) {
-    return "payload.to invalido";
-  }
-  if (payload.operation !== 0 && payload.operation !== 1) {
-    return "payload.operation invalido";
-  }
-  if (!validAddress(payload.sender)) {
-    return "payload.sender invalido";
-  }
-  if (!validAddress(payload.gasToken) || !validAddress(payload.refundReceiver)) {
-    return "gasToken o refundReceiver invalido";
-  }
-  for (const field of ["value", "safeTxGas", "baseGas", "gasPrice"]) {
-    if (!validUintString(payload[field])) {
-      return `${field} invalido`;
-    }
-  }
-  if (!Number.isSafeInteger(payload.nonce) || payload.nonce < 0) {
-    return "nonce invalido";
-  }
-  if (!HASH_PATTERN.test(payload.contractTransactionHash ?? "")) {
-    return "contractTransactionHash invalido";
-  }
-  if (!validHex(payload.data)) {
-    return "payload.data invalido";
-  }
-  if (!SIGNATURE_PATTERN.test(payload.signature ?? "")) {
-    return "firma Safe invalida";
+  if (!HASH_PATTERN.test(safeTxHash ?? "")) {
+    return "safeTxHash invalido";
   }
   return null;
 }
@@ -121,24 +69,21 @@ export default async function handler(request, response) {
 
   const body = request.body ?? {};
   const chainId = body.chainId;
-  const safeAddress = body.safeAddress;
-  const payload = body.payload;
-  const validationError = validateSafeProposal({ chainId, safeAddress, payload });
+  const safeTxHash = body.safeTxHash;
+  const validationError = validateSafeTransactionLookup({ chainId, safeTxHash });
 
   if (validationError) {
     return json(response, 400, { error: validationError });
   }
 
   const baseUrl = serviceUrl(chainId);
-  const url = `${baseUrl}/api/v1/safes/${safeAddress}/multisig-transactions/`;
+  const url = `${baseUrl}/api/v1/multisig-transactions/${safeTxHash}/`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 20_000);
 
   try {
     const upstream = await fetch(url, {
-      method: "POST",
       headers: safeApiHeaders(),
-      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     const text = await upstream.text();
@@ -154,7 +99,7 @@ export default async function handler(request, response) {
 
     if (!upstream.ok) {
       return json(response, upstream.status, {
-        error: "Safe Transaction Service rechazo la propuesta",
+        error: "Safe Transaction Service no encontro la transaccion",
         status: upstream.status,
         detail: data,
         url,
