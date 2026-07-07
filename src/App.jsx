@@ -9,7 +9,10 @@ import { ethers } from "ethers";
 import { MiniKit } from "@worldcoin/minikit-js";
 import {
   buildSafeUiTransactionDraft,
+  confirmSafeTransactionWithPrivateKeyWallet,
+  executeSafeTransactionFromServiceWithPrivateKeyWallet,
   formatBalance,
+  inspectSafeTransactionStatus,
   isValidEvmAddressInput,
   normalizePrivateKey,
   normalizeAddress,
@@ -1307,7 +1310,12 @@ function SafeRescuePanel({
   connectedExternalAddress,
   onCopyPlan,
   onCopySafeUiDraft,
+  onConfirmSafeTx,
+  onExecuteSafeTx,
+  onInspectSafeTx,
   onProposeSafeTx,
+  safeTxHashInput,
+  onSafeTxHashChange,
 }) {
   if (!asset) return null;
 
@@ -1463,13 +1471,42 @@ function SafeRescuePanel({
           </button>
         )}
         {safe.detected && signerIsOwner && (
-          <button
-            className="button button--secondary"
-            type="button"
-            onClick={onProposeSafeTx}
-          >
-            Proponer en Safe
-          </button>
+          <>
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={onProposeSafeTx}
+            >
+              Proponer en Safe
+            </button>
+            <input
+              className="safe-rescue__hash-input"
+              value={safeTxHashInput}
+              onChange={(event) => onSafeTxHashChange(event.target.value)}
+              placeholder="safeTxHash 0x..."
+            />
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={onConfirmSafeTx}
+            >
+              Confirmar Safe Tx
+            </button>
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={onInspectSafeTx}
+            >
+              Consultar Safe Tx
+            </button>
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={onExecuteSafeTx}
+            >
+              Ejecutar Safe Tx
+            </button>
+          </>
         )}
       </div>
     </section>
@@ -1585,6 +1622,7 @@ export default function App() {
   const [networkFilter, setNetworkFilter] = useState("all");
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
+  const [safeTxHashInput, setSafeTxHashInput] = useState("");
   const [feeAccepted, setFeeAccepted] = useState(false);
   const [showSendConfirm, setShowSendConfirm] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -3386,6 +3424,132 @@ export default function App() {
     targetAddress,
   ]);
 
+  const confirmSelectedSafeTransaction = useCallback(async () => {
+    try {
+      if (!selectedAsset) {
+        throw new Error("Selecciona primero una Safe desplegada.");
+      }
+      if (!selectedAssetSafeProposalAvailable) {
+        throw new Error("Conecta o importa un owner de la Safe desplegada.");
+      }
+      if (!privateKeyRef.current) {
+        throw new Error(
+          "Para confirmar un safeTxHash desde RC Wallet importa la llave privada owner.",
+        );
+      }
+      const result = await confirmSafeTransactionWithPrivateKeyWallet({
+        privateKey: privateKeyRef.current,
+        chainId: selectedAsset.chainId,
+        safeTxHash: safeTxHashInput,
+      });
+
+      await copyTextToClipboard(JSON.stringify(result, null, 2));
+      showStatus(
+        "Confirmacion Safe enviada. Resultado copiado para revisar en Safe UI.",
+        "success",
+      );
+    } catch (error) {
+      showStatus(
+        error instanceof Error
+          ? error.message
+          : "No se pudo confirmar la transaccion Safe",
+        "error",
+      );
+    }
+  }, [
+    safeTxHashInput,
+    selectedAsset,
+    selectedAssetSafeProposalAvailable,
+    showStatus,
+  ]);
+
+  const inspectSelectedSafeTransaction = useCallback(async () => {
+    try {
+      if (!selectedAsset) {
+        throw new Error("Selecciona primero una Safe desplegada.");
+      }
+      const status = await inspectSafeTransactionStatus({
+        chainId: selectedAsset.chainId,
+        safeTxHash: safeTxHashInput,
+      });
+
+      await copyTextToClipboard(JSON.stringify(status, null, 2));
+      showStatus(
+        status.readyToExecute
+          ? "Safe Tx lista para ejecutar. Estado copiado."
+          : "Estado Safe Tx copiado. Revisa cuantas firmas faltan.",
+        status.readyToExecute ? "success" : "warning",
+      );
+    } catch (error) {
+      showStatus(
+        error instanceof Error
+          ? error.message
+          : "No se pudo consultar la transaccion Safe",
+        "error",
+      );
+    }
+  }, [safeTxHashInput, selectedAsset, showStatus]);
+
+  const executeSelectedSafeTransaction = useCallback(async () => {
+    try {
+      if (!selectedAsset) {
+        throw new Error("Selecciona primero una Safe desplegada.");
+      }
+      if (!privateKeyRef.current) {
+        throw new Error(
+          "Para ejecutar una Safe Tx desde RC Wallet importa una llave con gas para esta red.",
+        );
+      }
+      const result = await executeSafeTransactionFromServiceWithPrivateKeyWallet({
+        privateKey: privateKeyRef.current,
+        chainId: selectedAsset.chainId,
+        safeTxHash: safeTxHashInput,
+      });
+
+      const transactionRecord = {
+        ...result,
+        network: selectedAsset.network,
+        symbol: selectedAsset.symbol,
+      };
+      setLastTransaction(transactionRecord);
+      setTransferHistory((current) => [
+        {
+          hash: result.hash,
+          hashes: result.hashes ?? (result.hash ? [result.hash] : []),
+          networkName: selectedAsset.networkName,
+          chainId: selectedAsset.chainId,
+          token: selectedAsset.symbol,
+          amount: "Safe Tx",
+          recipient: targetAddress,
+          route: result.route,
+          createdAt: new Date().toISOString(),
+        },
+        ...current,
+      ].slice(0, 25));
+      const copiedResult = {
+        ...result,
+        hash: result.hash,
+        networkName: selectedAsset.networkName,
+        chainId: selectedAsset.chainId,
+        symbol: selectedAsset.symbol,
+        amount: "Safe Tx",
+        recipient: targetAddress,
+      };
+      await copyTextToClipboard(JSON.stringify(copiedResult, null, 2));
+      showStatus(
+        "Safe Tx ejecutada. Resultado copiado y transaccion guardada en historial.",
+        "success",
+      );
+    } catch (error) {
+      showStatus(
+        error instanceof Error
+          ? error.message
+          : "No se pudo ejecutar la transaccion Safe",
+        "error",
+      );
+    }
+  }, [safeTxHashInput, selectedAsset, showStatus, targetAddress]);
+
   const copyMaximumRecoveryDossier = useCallback(async () => {
     const dossier = {
       format: "rc-wallet-movement-dossier",
@@ -5024,7 +5188,12 @@ export default function App() {
                 connectedExternalAddress={connectedExternalAddress}
                 onCopyPlan={copySelectedRescuePlan}
                 onCopySafeUiDraft={copySafeUiTransactionDraft}
+                onConfirmSafeTx={confirmSelectedSafeTransaction}
+                onExecuteSafeTx={executeSelectedSafeTransaction}
+                onInspectSafeTx={inspectSelectedSafeTransaction}
                 onProposeSafeTx={proposeSelectedSafeTransaction}
+                safeTxHashInput={safeTxHashInput}
+                onSafeTxHashChange={setSafeTxHashInput}
               />
             )}
 

@@ -1749,6 +1749,14 @@ function safeTransactionServiceUrl(chainId) {
   return serviceUrl.replace(/\/+$/, "");
 }
 
+function normalizeSafeTxHash(safeTxHash) {
+  const normalized = String(safeTxHash ?? "").trim();
+  if (!/^0x[a-fA-F0-9]{64}$/.test(normalized)) {
+    throw new Error("safeTxHash invalido: debe ser un hash 0x de 32 bytes");
+  }
+  return `0x${normalized.slice(2)}`;
+}
+
 async function postSafeTransactionProposal({ chainId, safeAddress, payload }) {
   let proxiedProposal = null;
 
@@ -1861,6 +1869,324 @@ function isRcSafeProposalRejection(error) {
     error instanceof Error &&
     error.message.startsWith("API RC Safe rechazo la propuesta")
   );
+}
+
+async function postSafeTransactionConfirmation({
+  chainId,
+  safeTxHash,
+  signature,
+}) {
+  let proxiedConfirmation = null;
+
+  try {
+    proxiedConfirmation = await postSafeTransactionConfirmationViaRcApi({
+      chainId,
+      safeTxHash,
+      signature,
+    });
+  } catch (error) {
+    if (isRcSafeConfirmationRejection(error)) throw error;
+    console.warn("[RC Wallet] Safe confirmation API fallback", error);
+  }
+
+  if (proxiedConfirmation) return proxiedConfirmation;
+
+  const serviceUrl = safeTransactionServiceUrl(chainId);
+  const url = `${serviceUrl}/api/v1/multisig-transactions/${safeTxHash}/confirmations/`;
+  const response = await timeout(
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ signature }),
+    }),
+    20_000,
+    "Safe Transaction Service",
+  );
+  const responseBody = await readSafeProposalResponse(response);
+
+  if (!response.ok) {
+    throw new Error(
+      `Safe Transaction Service rechazo la confirmacion (${response.status}). ${formatSafeProposalDetail(
+        responseBody,
+      )}`,
+    );
+  }
+
+  return {
+    url,
+    status: response.status,
+    response: responseBody,
+    via: "safe-transaction-service",
+  };
+}
+
+async function postSafeTransactionConfirmationViaRcApi({
+  chainId,
+  safeTxHash,
+  signature,
+}) {
+  if (typeof window === "undefined" || typeof fetch !== "function") {
+    return null;
+  }
+
+  const url = "/api/safe-confirm";
+  const response = await timeout(
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ chainId, safeTxHash, signature }),
+    }),
+    20_000,
+    "API RC Safe",
+  );
+  const contentType = response.headers?.get?.("content-type") ?? "";
+  const responseBody = await readSafeProposalResponse(response);
+
+  if (contentType.includes("text/html")) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `API RC Safe rechazo la confirmacion (${response.status}). ${formatSafeProposalDetail(
+        responseBody,
+      )}`,
+    );
+  }
+
+  return {
+    url,
+    status: response.status,
+    response: responseBody,
+    via: "rc-wallet-api",
+  };
+}
+
+function isRcSafeConfirmationRejection(error) {
+  return (
+    error instanceof Error &&
+    error.message.startsWith("API RC Safe rechazo la confirmacion")
+  );
+}
+
+async function readSafeTransactionDetails({ chainId, safeTxHash }) {
+  let proxiedDetails = null;
+
+  try {
+    proxiedDetails = await readSafeTransactionDetailsViaRcApi({
+      chainId,
+      safeTxHash,
+    });
+  } catch (error) {
+    if (isRcSafeTransactionLookupRejection(error)) throw error;
+    console.warn("[RC Wallet] Safe transaction lookup API fallback", error);
+  }
+
+  if (proxiedDetails) return proxiedDetails;
+
+  const serviceUrl = safeTransactionServiceUrl(chainId);
+  const url = `${serviceUrl}/api/v1/multisig-transactions/${safeTxHash}/`;
+  const response = await timeout(
+    fetch(url, {
+      headers: {
+        accept: "application/json",
+      },
+    }),
+    20_000,
+    "Safe Transaction Service",
+  );
+  const responseBody = await readSafeProposalResponse(response);
+
+  if (!response.ok) {
+    throw new Error(
+      `Safe Transaction Service no encontro la transaccion (${response.status}). ${formatSafeProposalDetail(
+        responseBody,
+      )}`,
+    );
+  }
+
+  return {
+    url,
+    status: response.status,
+    response: responseBody,
+    via: "safe-transaction-service",
+  };
+}
+
+async function readSafeTransactionDetailsViaRcApi({ chainId, safeTxHash }) {
+  if (typeof window === "undefined" || typeof fetch !== "function") {
+    return null;
+  }
+
+  const url = "/api/safe-transaction";
+  const response = await timeout(
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ chainId, safeTxHash }),
+    }),
+    20_000,
+    "API RC Safe",
+  );
+  const contentType = response.headers?.get?.("content-type") ?? "";
+  const responseBody = await readSafeProposalResponse(response);
+
+  if (contentType.includes("text/html")) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `API RC Safe no encontro la transaccion (${response.status}). ${formatSafeProposalDetail(
+        responseBody,
+      )}`,
+    );
+  }
+
+  return {
+    url,
+    status: response.status,
+    response: responseBody,
+    via: "rc-wallet-api",
+  };
+}
+
+function isRcSafeTransactionLookupRejection(error) {
+  return (
+    error instanceof Error &&
+    error.message.startsWith("API RC Safe no encontro la transaccion")
+  );
+}
+
+function normalizeSafeTransactionStatus(payload, chainId, safeTxHash) {
+  const transaction = payload?.response ?? payload;
+  const confirmations = Array.isArray(transaction?.confirmations)
+    ? transaction.confirmations
+    : [];
+  const confirmationsRequired = Number(
+    transaction?.confirmationsRequired ??
+      transaction?.confirmations_required ??
+      transaction?.threshold ??
+      0,
+  );
+
+  return {
+    chainId: Number(chainId),
+    safeTxHash,
+    safe: transaction?.safe ?? null,
+    to: transaction?.to ?? null,
+    value: transaction?.value ?? null,
+    data: transaction?.data ?? null,
+    operation: transaction?.operation ?? null,
+    nonce: transaction?.nonce ?? null,
+    isExecuted: Boolean(transaction?.isExecuted ?? transaction?.is_executed),
+    confirmationsRequired,
+    confirmationsSubmitted: confirmations.length,
+    readyToExecute:
+      confirmationsRequired > 0 && confirmations.length >= confirmationsRequired,
+    confirmations: confirmations.map((confirmation) => ({
+      owner: confirmation.owner ?? confirmation.sender ?? null,
+      signature: confirmation.signature ?? null,
+      signatureType: confirmation.signatureType ?? confirmation.signature_type ?? null,
+    })),
+    source: {
+      url: payload?.url ?? null,
+      via: payload?.via ?? null,
+      status: payload?.status ?? null,
+    },
+    raw: transaction,
+  };
+}
+
+function networkByChainId(chainId) {
+  const network = NETWORKS.find(
+    (candidate) => Number(candidate.chainId) === Number(chainId),
+  );
+  if (!network) {
+    throw new Error("Red no configurada para ejecutar esta Safe Tx");
+  }
+  return network;
+}
+
+function safeServiceUint(value, fallback = "0") {
+  const normalized = String(value ?? fallback);
+  if (!/^(0|[1-9][0-9]*)$/.test(normalized)) {
+    throw new Error("La transaccion Safe contiene un entero invalido");
+  }
+  return BigInt(normalized);
+}
+
+function safeServiceData(value) {
+  const data = value || "0x";
+  if (!/^0x(?:[a-fA-F0-9]{2})*$/.test(data)) {
+    throw new Error("La transaccion Safe contiene data invalida");
+  }
+  return data;
+}
+
+function safeServiceOperation(value) {
+  const operation = Number(value ?? 0);
+  if (operation !== 0 && operation !== 1) {
+    throw new Error("La transaccion Safe contiene operation invalida");
+  }
+  return operation;
+}
+
+function normalizeSafeServiceTransaction(status) {
+  const raw = status.raw ?? {};
+  return {
+    safe: normalizeAddress(status.safe ?? raw.safe),
+    to: normalizeAddress(status.to ?? raw.to),
+    value: safeServiceUint(status.value ?? raw.value),
+    data: safeServiceData(status.data ?? raw.data),
+    operation: safeServiceOperation(status.operation ?? raw.operation),
+    safeTxGas: safeServiceUint(raw.safeTxGas ?? raw.safe_tx_gas),
+    baseGas: safeServiceUint(raw.baseGas ?? raw.base_gas),
+    gasPrice: safeServiceUint(raw.gasPrice ?? raw.gas_price),
+    gasToken: normalizeAddress(raw.gasToken ?? raw.gas_token ?? ethers.ZeroAddress),
+    refundReceiver: normalizeAddress(
+      raw.refundReceiver ?? raw.refund_receiver ?? ethers.ZeroAddress,
+    ),
+    nonce: safeServiceUint(status.nonce ?? raw.nonce),
+  };
+}
+
+function buildSafeExecutionSignatures(status, liveOwners, threshold) {
+  const ownerSet = new Set(liveOwners.map((owner) => normalizeAddress(owner)));
+  const signaturesByOwner = new Map();
+
+  for (const confirmation of status.confirmations ?? []) {
+    if (!confirmation.owner || !confirmation.signature) continue;
+    const owner = normalizeAddress(confirmation.owner);
+    const signature = String(confirmation.signature);
+    if (!ownerSet.has(owner) || !/^0x[a-fA-F0-9]{130}$/.test(signature)) {
+      continue;
+    }
+    if (!signaturesByOwner.has(owner)) {
+      signaturesByOwner.set(owner, signature);
+    }
+  }
+
+  if (signaturesByOwner.size < Number(threshold)) {
+    throw new Error(
+      `La Safe requiere ${Number(threshold)} firmas y solo hay ${signaturesByOwner.size} firma(s) validas.`,
+    );
+  }
+
+  const sorted = [...signaturesByOwner.entries()].sort(([left], [right]) =>
+    BigInt(left) < BigInt(right) ? -1 : BigInt(left) > BigInt(right) ? 1 : 0,
+  );
+
+  return {
+    owners: sorted.map(([owner]) => owner),
+    signatures: `0x${sorted.map(([, signature]) => signature.slice(2)).join("")}`,
+  };
 }
 
 async function buildSignedSafeProposal({
@@ -2050,6 +2376,144 @@ export async function proposeSafeTransactionWithPrivateKeyWallet({
     route: "safe-service-proposal-private-key",
     ...signedProposal,
     proposal,
+  };
+}
+
+export async function confirmSafeTransactionWithPrivateKeyWallet({
+  privateKey,
+  chainId,
+  safeTxHash,
+}) {
+  const signer = new ethers.Wallet(normalizePrivateKey(privateKey));
+  const normalizedSafeTxHash = normalizeSafeTxHash(safeTxHash);
+  const signature = signer.signingKey.sign(normalizedSafeTxHash).serialized;
+  const confirmation = await postSafeTransactionConfirmation({
+    chainId,
+    safeTxHash: normalizedSafeTxHash,
+    signature,
+  });
+
+  return {
+    route: "safe-service-confirmation-private-key",
+    signerAddress: normalizeAddress(signer.address),
+    safeTxHash: normalizedSafeTxHash,
+    signature,
+    confirmation,
+  };
+}
+
+export async function inspectSafeTransactionStatus({ chainId, safeTxHash }) {
+  const normalizedSafeTxHash = normalizeSafeTxHash(safeTxHash);
+  const details = await readSafeTransactionDetails({
+    chainId,
+    safeTxHash: normalizedSafeTxHash,
+  });
+
+  return normalizeSafeTransactionStatus(
+    details,
+    chainId,
+    normalizedSafeTxHash,
+  );
+}
+
+export async function executeSafeTransactionFromServiceWithPrivateKeyWallet({
+  privateKey,
+  chainId,
+  safeTxHash,
+}) {
+  const normalizedSafeTxHash = normalizeSafeTxHash(safeTxHash);
+  const network = networkByChainId(chainId);
+  const status = await inspectSafeTransactionStatus({
+    chainId,
+    safeTxHash: normalizedSafeTxHash,
+  });
+
+  if (status.isExecuted) {
+    throw new Error("Esta Safe Tx ya aparece como ejecutada");
+  }
+  if (!status.readyToExecute) {
+    throw new Error(
+      `La Safe Tx aun no tiene firmas suficientes (${status.confirmationsSubmitted}/${status.confirmationsRequired}).`,
+    );
+  }
+
+  const safeTx = normalizeSafeServiceTransaction(status);
+  const provider = await getProvider(network);
+  const signer = new ethers.Wallet(normalizePrivateKey(privateKey), provider);
+  const signerAddress = normalizeAddress(signer.address);
+  const safeContract = new ethers.Contract(
+    safeTx.safe,
+    SAFE_INTROSPECTION_ABI,
+    signer,
+  );
+  const [owners, threshold] = await Promise.all([
+    timeout(safeContract.getOwners(), 7_000, "Safe owners"),
+    timeout(safeContract.getThreshold(), 7_000, "Safe threshold"),
+  ]);
+  const executionSignatures = buildSafeExecutionSignatures(
+    status,
+    owners,
+    Number(threshold),
+  );
+  const liveSafeTxHash = await timeout(
+    safeContract.getTransactionHash(
+      safeTx.to,
+      safeTx.value,
+      safeTx.data,
+      safeTx.operation,
+      safeTx.safeTxGas,
+      safeTx.baseGas,
+      safeTx.gasPrice,
+      safeTx.gasToken,
+      safeTx.refundReceiver,
+      safeTx.nonce,
+    ),
+    7_000,
+    "Safe transaction hash",
+  );
+
+  if (normalizeSafeTxHash(liveSafeTxHash) !== normalizedSafeTxHash) {
+    throw new Error(
+      "La Safe Tx consultada no coincide con el hash calculado en contrato",
+    );
+  }
+
+  const execArgs = [
+    safeTx.to,
+    safeTx.value,
+    safeTx.data,
+    safeTx.operation,
+    safeTx.safeTxGas,
+    safeTx.baseGas,
+    safeTx.gasPrice,
+    safeTx.gasToken,
+    safeTx.refundReceiver,
+    executionSignatures.signatures,
+  ];
+  const preflight = await assertCanPaySafeExecutionCosts({
+    provider,
+    signerAddress,
+    safeAddress: safeTx.safe,
+    safeContract,
+    execArgs,
+    networkSymbol: network.symbol,
+  });
+  const transaction = await safeContract.execTransaction(...execArgs, {
+    gasLimit: BigInt(preflight.gas.bufferedGasLimit),
+  });
+  const receipt = await transaction.wait(1);
+
+  return {
+    route: "safe-service-execute-private-key",
+    hash: transaction.hash,
+    hashes: [transaction.hash],
+    receipt,
+    receipts: [receipt],
+    safeTxHash: normalizedSafeTxHash,
+    signerAddress,
+    signaturesUsed: executionSignatures.owners,
+    preflight,
+    status,
   };
 }
 

@@ -1285,6 +1285,20 @@ summary:focus-visible {
   text-align: center;
 }
 
+.safe-rescue__hash-input {
+  min-height: 46px;
+  min-width: 0;
+  width: 100%;
+  border: 1px solid #30445c;
+  border-radius: 12px;
+  padding: 0 12px;
+  background: #070c13;
+  color: #fff;
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .recovery-explanation {
   margin-bottom: 16px;
   border: 1px solid #675426;
