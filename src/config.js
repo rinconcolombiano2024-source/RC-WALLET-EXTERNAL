@@ -19,6 +19,21 @@ export const ERC4337_ENTRYPOINTS = Object.freeze([
   },
 ]);
 
+export const SAFE_FACTORY_CANDIDATES = Object.freeze([
+  {
+    version: "1.4.1",
+    factory: "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+  },
+  {
+    version: "1.3.0",
+    factory: "0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2",
+  },
+  {
+    version: "1.1.1",
+    factory: "0x12302fE9c02ff50939BaAaaf415fc226C078613C",
+  },
+]);
+
 export const RECOVERY_ROUTE_CATALOG = Object.freeze([
   {
     id: "world-minikit",
@@ -276,6 +291,14 @@ export const SAFE_INTROSPECTION_ABI = Object.freeze([
   "function nonce() view returns (uint256)",
   "function getTransactionHash(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) view returns (bytes32)",
   "function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool success)",
+]);
+
+export const SAFE_PROXY_FACTORY_ABI = Object.freeze([
+  "function proxyCreationCode() view returns (bytes)",
+  "function createProxyWithNonce(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)",
+  "function createChainSpecificProxyWithNonce(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)",
+  "function createProxyWithCallback(address _singleton, bytes initializer, uint256 saltNonce, address callback) returns (address proxy)",
+  "event ProxyCreation(address indexed proxy, address singleton)",
 ]);
 
 export const ERC1271_ABI = Object.freeze([

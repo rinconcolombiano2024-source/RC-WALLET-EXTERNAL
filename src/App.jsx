@@ -13,6 +13,7 @@ import {
   normalizePrivateKey,
   normalizeAddress,
   privateKeyToAddress,
+  safeMirrorOwnersInclude,
   safeOwnersInclude,
   scanAllNetworks,
   sendWithExternalWallet,
@@ -663,6 +664,10 @@ function describeAccountRoute(accountState) {
     return `Safe ${accountState.safe.version || ""} · ${accountState.safe.threshold}/${accountState.safe.owners.length} firmas`;
   }
 
+  if (accountState.counterfactualSafe?.detected) {
+    return `Safe en ${accountState.counterfactualSafe.sourceNetworkName} · falta despliegue en esta red`;
+  }
+
   if (accountState.hasCode) {
     if (accountState.erc1271?.supported) {
       return "Contrato con respuesta EIP-1271";
@@ -687,10 +692,12 @@ function serializeNetworkDiagnostics(diagnostics) {
     assetCount: diagnostic.assetCount,
     hasGas: diagnostic.hasGas,
     safeDetected: diagnostic.safeDetected,
+    counterfactualSafeDetected: diagnostic.counterfactualSafeDetected,
     erc1271Supported: diagnostic.erc1271Supported,
     entryPointAvailable: diagnostic.entryPointAvailable,
     nativeGas: diagnostic.accountState?.nativeGas ?? null,
     safe: diagnostic.accountState?.safe ?? null,
+    counterfactualSafe: diagnostic.accountState?.counterfactualSafe ?? null,
     erc1271: diagnostic.accountState?.erc1271 ?? null,
     erc4337: diagnostic.accountState?.erc4337 ?? null,
     assets: diagnostic.assets.map((asset) => ({
@@ -728,6 +735,15 @@ function createRecoveryDiagnosis({
       connectedExternalAddress &&
       !safeSameAddress(connectedExternalAddress, targetAddress) &&
       safeOwnersInclude(accountState, connectedExternalAddress),
+  );
+  const counterfactualSafeDetected = Boolean(
+    accountState?.counterfactualSafe?.detected,
+  );
+  const counterfactualSafeOwnerConnected = Boolean(
+    counterfactualSafeDetected &&
+      connectedExternalAddress &&
+      !safeSameAddress(connectedExternalAddress, targetAddress) &&
+      safeMirrorOwnersInclude(accountState, connectedExternalAddress),
   );
   const safeThreshold = Number(accountState?.safe?.threshold ?? 0);
   const erc1271Supported = Boolean(accountState?.erc1271?.supported);
@@ -916,6 +932,21 @@ function createRecoveryDiagnosis({
             entryPointAvailable ? "EntryPoint detectado" : "Bundler/EntryPoint no confirmado",
           ]
         : ["Llave local o wallet misma direccion", "Gas de red", "Confirmacion manual"],
+    };
+  }
+
+  if (counterfactualSafeOwnerConnected) {
+    return {
+      level: "partial",
+      title: "Safe World App detectada: falta despliegue",
+      route: "Safe contrafactual / despliegue deterministico",
+      action:
+        `La llave conectada aparece como owner de la Safe en ${accountState.counterfactualSafe.sourceNetworkName}, pero en ${asset.networkName} la direccion aun no tiene contrato desplegado. Primero hay que desplegar la misma Safe con factory, singleton, initializer y salt originales; despues se podra ejecutar el movimiento desde Safe.`,
+      requirements: [
+        "Factory, singleton, initializer y salt originales",
+        `Gas en ${asset.networkName} para desplegar y ejecutar`,
+        "Owner Safe con firma valida",
+      ],
     };
   }
 
@@ -1137,19 +1168,6 @@ export default function App() {
     [assets, connectedExternalAddress, networkStates, targetAddress],
   );
 
-  const externalMatches = useMemo(() => {
-    if (!targetAddress || !connectedExternalAddress) return false;
-    try {
-      return (
-        normalizeAddress(targetAddress) ===
-          normalizeAddress(connectedExternalAddress) ||
-        externalControlsSafeTarget
-      );
-    } catch {
-      return false;
-    }
-  }, [connectedExternalAddress, externalControlsSafeTarget, targetAddress]);
-
   const selectedAssetUsesSafeOwnerSigner = useMemo(
     () =>
       Boolean(
@@ -1160,6 +1178,37 @@ export default function App() {
       ),
     [connectedExternalAddress, selectedAsset, targetAddress],
   );
+
+  const selectedAssetUsesCounterfactualSafeOwnerSigner = useMemo(
+    () =>
+      Boolean(
+        selectedAsset &&
+          connectedExternalAddress &&
+          !safeSameAddress(targetAddress, connectedExternalAddress) &&
+          safeMirrorOwnersInclude(
+            selectedAsset.accountState,
+            connectedExternalAddress,
+          ),
+      ),
+    [connectedExternalAddress, selectedAsset, targetAddress],
+  );
+
+  const externalMatches = useMemo(() => {
+    if (!targetAddress || !connectedExternalAddress) return false;
+    try {
+      return (
+        normalizeAddress(targetAddress) ===
+          normalizeAddress(connectedExternalAddress) ||
+        selectedAssetUsesSafeOwnerSigner
+      );
+    } catch {
+      return false;
+    }
+  }, [
+    connectedExternalAddress,
+    selectedAssetUsesSafeOwnerSigner,
+    targetAddress,
+  ]);
 
   const selectedNativeGasAsset = useMemo(
     () =>
@@ -1316,6 +1365,9 @@ export default function App() {
           accountLabel: accountKindLabel(accountState?.kind ?? state?.accountKind),
           routeSummary: describeAccountRoute(accountState),
           safeDetected: Boolean(accountState?.safe?.detected),
+          counterfactualSafeDetected: Boolean(
+            accountState?.counterfactualSafe?.detected,
+          ),
           erc1271Supported: Boolean(accountState?.erc1271?.supported),
           entryPointAvailable: Boolean(accountState?.erc4337?.entryPointAvailable),
           hasGas: Boolean(accountState?.nativeGas?.hasBalance),
@@ -1332,7 +1384,8 @@ export default function App() {
       (asset) => Boolean(asset.accountState?.hasCode),
     );
     const safeNetworks = recoveryNetworkDiagnostics.filter(
-      (diagnostic) => diagnostic.safeDetected,
+      (diagnostic) =>
+        diagnostic.safeDetected || diagnostic.counterfactualSafeDetected,
     );
     const erc4337Networks = recoveryNetworkDiagnostics.filter(
       (diagnostic) =>
@@ -1905,6 +1958,14 @@ export default function App() {
       return;
     }
 
+    if (selectedAssetUsesCounterfactualSafeOwnerSigner && selectedAsset) {
+      showStatus(
+        `La llave cargada es owner de la Safe en World Chain, pero en ${selectedAsset.networkName} falta desplegar esa Safe antes de mover los fondos.`,
+        "warning",
+      );
+      return;
+    }
+
     if (externalControlsSafeTarget) {
       showStatus(
         "La wallet externa es owner de la Safe analizada. RC Wallet mantendra la direccion con fondos y usara esa firma para ejecutar la Safe.",
@@ -1928,6 +1989,8 @@ export default function App() {
     connectedExternalAddress,
     externalControlsSafeTarget,
     externalMatches,
+    selectedAsset,
+    selectedAssetUsesCounterfactualSafeOwnerSigner,
     showStatus,
     targetAddress,
   ]);
@@ -2401,7 +2464,8 @@ export default function App() {
       if (
         selectedAsset.isNative &&
         amountUnits === selectedAsset.rawBalance &&
-        !selectedAssetUsesSafeOwnerSigner
+        !selectedAssetUsesSafeOwnerSigner &&
+        !selectedAssetUsesCounterfactualSafeOwnerSigner
       ) {
         throw new Error(
           "En monedas nativas debes dejar saldo para pagar el gas",
@@ -2421,14 +2485,19 @@ export default function App() {
         );
       } else {
         const externalConnection = externalConnectionRef.current;
-        if (!externalMatches || !externalConnection) {
+        if (
+          (!externalMatches && !selectedAssetUsesCounterfactualSafeOwnerSigner) ||
+          !externalConnection
+        ) {
           throw new Error(
             "Conecta una wallet externa que exponga exactamente la dirección con fondos",
           );
         }
 
         showStatus(
-          externalConnection.type === "private-key"
+          selectedAssetUsesCounterfactualSafeOwnerSigner
+            ? `Desplegando Safe en ${selectedAsset.networkName} y preparando movimiento...`
+            : externalConnection.type === "private-key"
             ? `Firmando localmente en ${selectedAsset.networkName}...`
             : `Abriendo la firma externa en ${selectedAsset.networkName}…`,
         );
@@ -2509,6 +2578,7 @@ export default function App() {
     recipient,
     scan,
     selectedAsset,
+    selectedAssetUsesCounterfactualSafeOwnerSigner,
     selectedAssetUsesSafeOwnerSigner,
     sendFromWorldChain,
     sending,
@@ -2880,6 +2950,7 @@ export default function App() {
   const canSendSelected = Boolean(
     selectedAsset &&
       (externalMatches ||
+        selectedAssetUsesCounterfactualSafeOwnerSigner ||
         (selectedAsset.chainId === WORLD_CHAIN_ID
           ? authenticated &&
             miniKitReady &&
@@ -4121,7 +4192,8 @@ export default function App() {
                   <div className="capability-row">
                     <span
                       className={
-                        diagnostic.safeDetected
+                        diagnostic.safeDetected ||
+                        diagnostic.counterfactualSafeDetected
                           ? "capability capability--on"
                           : "capability"
                       }
@@ -4153,6 +4225,16 @@ export default function App() {
                       Safe {diagnostic.accountState.safe.version}:{" "}
                       {diagnostic.accountState.safe.threshold}/
                       {diagnostic.accountState.safe.owners.length} firmas.
+                    </p>
+                  )}
+
+                  {diagnostic.accountState?.counterfactualSafe?.detected && (
+                    <p className="diagnostic-note">
+                      Safe detectada en{" "}
+                      {diagnostic.accountState.counterfactualSafe.sourceNetworkName};{" "}
+                      {diagnostic.accountState.counterfactualSafe.deployment?.ready
+                        ? `lista para desplegar en ${diagnostic.network.name}.`
+                        : `falta recuperar o validar la creacion para ${diagnostic.network.name}.`}
                     </p>
                   )}
 
@@ -4482,7 +4564,9 @@ export default function App() {
               {sending
                 ? "Esperando confirmación…"
                 : canSubmitRecovery
-                  ? `Enviar ${selectedAsset.symbol}`
+                  ? selectedAssetUsesCounterfactualSafeOwnerSigner
+                    ? `Desplegar Safe y enviar ${selectedAsset.symbol}`
+                    : `Enviar ${selectedAsset.symbol}`
                   : canSendSelected
                     ? "Completa destino y monto para continuar"
                     : selectedAsset.chainId === WORLD_CHAIN_ID
