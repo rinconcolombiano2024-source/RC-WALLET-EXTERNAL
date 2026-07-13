@@ -318,9 +318,13 @@ export const SAFE_INTROSPECTION_ABI = Object.freeze([
 export const SAFE_PROXY_FACTORY_ABI = Object.freeze([
   "function proxyCreationCode() view returns (bytes)",
   "function createProxyWithNonce(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)",
+  "function createProxyWithNonceL2(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)",
   "function createChainSpecificProxyWithNonce(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)",
+  "function createChainSpecificProxyWithNonceL2(address _singleton, bytes initializer, uint256 saltNonce) returns (address proxy)",
   "function createProxyWithCallback(address _singleton, bytes initializer, uint256 saltNonce, address callback) returns (address proxy)",
   "event ProxyCreation(address indexed proxy, address singleton)",
+  "event ProxyCreationL2(address indexed proxy, address singleton, bytes initializer, uint256 saltNonce)",
+  "event ChainSpecificProxyCreationL2(address indexed proxy, address singleton, bytes initializer, uint256 saltNonce, uint256 chainId)",
 ]);
 
 export const ERC1271_ABI = Object.freeze([

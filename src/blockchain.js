@@ -26,6 +26,16 @@ const GAS_LIMIT_BUFFER_BPS = 12_000n;
 const GAS_PRICE_BUFFER_BPS = 12_000n;
 const SAFE_OPERATION_CALL = 0;
 const SAFE_CREATION_LOG_BATCH_SIZE = 250_000;
+const SAFE_CHAIN_SPECIFIC_CREATION_METHODS = new Set([
+  "createChainSpecificProxyWithNonce",
+  "createChainSpecificProxyWithNonceL2",
+]);
+const SAFE_SUPPORTED_CREATION_METHODS = new Set([
+  "createProxyWithNonce",
+  "createProxyWithNonceL2",
+  "createProxyWithCallback",
+  ...SAFE_CHAIN_SPECIFIC_CREATION_METHODS,
+]);
 const SECP256K1_ORDER =
   0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 const safeDeploymentCache = new Map();
@@ -418,6 +428,10 @@ function getSafeEffectiveSaltNonce(method, saltNonce, callback) {
   );
 }
 
+function isChainSpecificSafeCreationMethod(method) {
+  return SAFE_CHAIN_SPECIFIC_CREATION_METHODS.has(method);
+}
+
 function createSafeDeploymentSalt({
   method,
   initializer,
@@ -434,7 +448,7 @@ function createSafeDeploymentSalt({
     ethers.keccak256(initializer),
     uint256ToBytes32(effectiveSaltNonce),
   ];
-  if (method === "createChainSpecificProxyWithNonce") {
+  if (isChainSpecificSafeCreationMethod(method)) {
     parts.push(uint256ToBytes32(chainId));
   }
   return ethers.keccak256(ethers.concat(parts));
@@ -576,13 +590,7 @@ function parseSafeFactoryTransaction(transaction) {
     return null;
   }
 
-  if (
-    ![
-      "createProxyWithNonce",
-      "createProxyWithCallback",
-      "createChainSpecificProxyWithNonce",
-    ].includes(parsed.name)
-  ) {
+  if (!SAFE_SUPPORTED_CREATION_METHODS.has(parsed.name)) {
     return null;
   }
 
@@ -662,6 +670,18 @@ function normalizeSafeCreationPayload(payload, sourceUrl) {
     data.salt_nonce ??
     data.salt ??
     null;
+  const method =
+    data.method ??
+    data.creationMethod ??
+    data.creation_method ??
+    data.factoryMethod ??
+    data.factory_method ??
+    null;
+  const callback =
+    data.callback ??
+    data.callbackAddress ??
+    data.callback_address ??
+    null;
 
   if (!transactionHash && !factory && !singleton && !initializer) {
     return null;
@@ -681,6 +701,12 @@ function normalizeSafeCreationPayload(payload, sourceUrl) {
       saltNonce !== null && saltNonce !== undefined
         ? BigInt(saltNonce).toString()
         : null,
+    method:
+      typeof method === "string" && SAFE_SUPPORTED_CREATION_METHODS.has(method)
+        ? method
+        : null,
+    callback:
+      callback && ethers.isAddress(callback) ? normalizeAddress(callback) : null,
   };
 }
 
@@ -740,11 +766,11 @@ async function buildDeploymentFromCreation({
 
   if (!parsed && creation.singleton && creation.initializer && creation.saltNonce) {
     parsed = {
-      method: "createProxyWithNonce",
+      method: creation.method ?? "createProxyWithNonce",
       singleton: creation.singleton,
       initializer: creation.initializer,
       saltNonce: creation.saltNonce,
-      callback: null,
+      callback: creation.callback ?? null,
     };
   }
 
@@ -773,8 +799,7 @@ async function buildDeploymentFromCreation({
     sourceTransactionHash: creation.transactionHash ?? null,
     sourceUrl: creation.sourceUrl,
     predictedSourceAddress,
-    canReplayCrossChain:
-      parsed.method !== "createChainSpecificProxyWithNonce",
+    canReplayCrossChain: !isChainSpecificSafeCreationMethod(parsed.method),
   };
 }
 
@@ -869,8 +894,7 @@ async function findSafeDeploymentOnWorldChain(owner) {
           sourceChainId: WORLD_CHAIN_ID,
           sourceTransactionHash: log.transactionHash,
           predictedSourceAddress,
-          canReplayCrossChain:
-            parsed.method !== "createChainSpecificProxyWithNonce",
+          canReplayCrossChain: !isChainSpecificSafeCreationMethod(parsed.method),
         };
       }
     }
@@ -2641,6 +2665,80 @@ async function sendWithSafeOwnerSigner({
   };
 }
 
+function getSafeFactoryDeploymentCall(factory, deployment) {
+  const method = deployment.method ?? "createProxyWithNonce";
+  const saltNonce = BigInt(deployment.saltNonce);
+
+  if (isChainSpecificSafeCreationMethod(method)) {
+    throw new Error(
+      "La Safe original usa un metodo dependiente de chainId. No se puede reproducir la misma direccion en otra red.",
+    );
+  }
+
+  if (method === "createProxyWithCallback") {
+    if (!deployment.callback) {
+      throw new Error(
+        "La Safe original usa callback, pero falta la direccion callback verificable.",
+      );
+    }
+
+    return {
+      method,
+      estimateGas: () =>
+        factory.createProxyWithCallback.estimateGas(
+          deployment.singleton,
+          deployment.initializer,
+          saltNonce,
+          deployment.callback,
+        ),
+      send: (overrides) =>
+        factory.createProxyWithCallback(
+          deployment.singleton,
+          deployment.initializer,
+          saltNonce,
+          deployment.callback,
+          overrides,
+        ),
+    };
+  }
+
+  if (method === "createProxyWithNonceL2") {
+    return {
+      method,
+      estimateGas: () =>
+        factory.createProxyWithNonceL2.estimateGas(
+          deployment.singleton,
+          deployment.initializer,
+          saltNonce,
+        ),
+      send: (overrides) =>
+        factory.createProxyWithNonceL2(
+          deployment.singleton,
+          deployment.initializer,
+          saltNonce,
+          overrides,
+        ),
+    };
+  }
+
+  return {
+    method: "createProxyWithNonce",
+    estimateGas: () =>
+      factory.createProxyWithNonce.estimateGas(
+        deployment.singleton,
+        deployment.initializer,
+        saltNonce,
+      ),
+    send: (overrides) =>
+      factory.createProxyWithNonce(
+        deployment.singleton,
+        deployment.initializer,
+        saltNonce,
+        overrides,
+      ),
+  };
+}
+
 async function deployCounterfactualSafeMirror({
   provider,
   signer,
@@ -2709,19 +2807,11 @@ async function deployCounterfactualSafeMirror({
     SAFE_PROXY_FACTORY_ABI,
     signer,
   );
-  const deploySaltNonce = getSafeEffectiveSaltNonce(
-    deployment.method,
-    deployment.saltNonce,
-    deployment.callback,
-  );
+  const deploymentCall = getSafeFactoryDeploymentCall(factory, deployment);
   const gasEstimate = await timeout(
-    factory.createProxyWithNonce.estimateGas(
-      deployment.singleton,
-      deployment.initializer,
-      deploySaltNonce,
-    ),
+    deploymentCall.estimateGas(),
     12_000,
-    "Safe deployment gas",
+    `Safe deployment gas ${deploymentCall.method}`,
   );
   const feeData = await provider.getFeeData();
   const maxGasPrice = getGasPriceForMaxCost(feeData);
@@ -2747,12 +2837,7 @@ async function deployCounterfactualSafeMirror({
     );
   }
 
-  const transaction = await factory.createProxyWithNonce(
-    deployment.singleton,
-    deployment.initializer,
-    deploySaltNonce,
-    { gasLimit },
-  );
+  const transaction = await deploymentCall.send({ gasLimit });
   const receipt = await transaction.wait(1);
   const deployedCode = await timeout(
     provider.getCode(safeAddress),
@@ -2790,6 +2875,7 @@ async function deployCounterfactualSafeMirror({
         8,
       )} ${asset.network.symbol}`,
       gas: {
+        method: deploymentCall.method,
         gasLimit: gasEstimate.toString(),
         bufferedGasLimit: gasLimit.toString(),
         maxGasPrice: maxGasPrice.toString(),

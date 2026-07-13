@@ -674,6 +674,21 @@ function getNativeGasAsset(assets, chainId) {
   );
 }
 
+function assetRecoveryPriority(asset) {
+  if (!asset) return 99;
+  if (asset.chainId === 1) return 0;
+  if (asset.chainId !== WORLD_CHAIN_ID) return 1;
+  return 2;
+}
+
+function sortAssetsForRecovery(left, right) {
+  const priority = assetRecoveryPriority(left) - assetRecoveryPriority(right);
+  if (priority !== 0) return priority;
+  return `${left.networkName}-${left.symbol}`.localeCompare(
+    `${right.networkName}-${right.symbol}`,
+  );
+}
+
 function selectPrimaryExternalAssetId(assets, currentId) {
   const currentAsset = assets.find((asset) => asset.id === currentId);
   if (currentAsset && currentAsset.chainId !== WORLD_CHAIN_ID) {
@@ -681,6 +696,7 @@ function selectPrimaryExternalAssetId(assets, currentId) {
   }
 
   return (
+    assets.find((asset) => asset.chainId === 1)?.id ??
     assets.find((asset) => asset.chainId !== WORLD_CHAIN_ID)?.id ??
     currentAsset?.id ??
     assets[0]?.id ??
@@ -1290,11 +1306,11 @@ function RescueMissionPanel({
       <div className="rescue-mission__head">
         <div>
           <span className="eyebrow">RC Wallet External Rescue</span>
-          <h2>Rescate Worldcoin en redes externas</h2>
+          <h2>Mover fondos Worldcoin en Ethereum y redes externas</h2>
           <p>
-            RC Wallet detecto fondos en esta direccion. Para moverlos necesita
-            una de estas pruebas: llave exacta, owner Safe valido o despliegue
-            Safe compatible en esta red.
+            RC Wallet detecta fondos en Ethereum, Base, Optimism, BNB y otras
+            redes EVM. Para moverlos necesita llave exacta, owner Safe valido o
+            despliegue Safe compatible en la red donde estan los tokens.
           </p>
         </div>
         <span className={signerReady ? "badge badge--green" : "badge badge--amber"}>
@@ -1446,6 +1462,7 @@ function SafeRescuePanel({
   asset,
   targetAddress,
   connectedExternalAddress,
+  onDeploySafeMirror,
   onCopyPlan,
   onCopySafeUiDraft,
   onConfirmSafeTx,
@@ -1473,6 +1490,13 @@ function SafeRescuePanel({
   const signerIsOwner =
     safeOwnersInclude(accountState, connectedExternalAddress) ||
     safeMirrorOwnersInclude(accountState, connectedExternalAddress);
+  const safeMirrorDetected = Boolean(mirror.detected);
+  const safeMirrorReady = Boolean(
+    safeMirrorDetected &&
+      signerIsOwner &&
+      deployment.ready &&
+      deployment.targetPredictionMatches,
+  );
 
   return (
     <section className={`safe-rescue safe-rescue--${rescueState.level}`}>
@@ -1557,6 +1581,10 @@ function SafeRescuePanel({
           {(mirror.detected || deployment.targetPrediction) && (
             <div className="safe-deploy-matrix">
               <div>
+                <span>Metodo</span>
+                <code>{displaySafeValue(deployment.method)}</code>
+              </div>
+              <div>
                 <span>Factory</span>
                 <code>{displaySafeValue(deployment.factory)}</code>
               </div>
@@ -1578,6 +1606,19 @@ function SafeRescuePanel({
       )}
 
       <div className="safe-rescue__actions">
+        {safeMirrorDetected && (
+          <button
+            className={`button button--deploy-safe ${
+              safeMirrorReady ? "button--deploy-safe-ready" : ""
+            }`}
+            type="button"
+            onClick={onDeploySafeMirror}
+          >
+            {safeMirrorReady
+              ? "Desplegar Safe y mover"
+              : "Desplegar Safe pendiente"}
+          </button>
+        )}
         <a
           className="button button--secondary"
           href={explorerAddressUrl(asset.network, targetAddress)}
@@ -1790,7 +1831,7 @@ export default function App() {
   const [status, setStatus] = useState({
     type: "info",
     message:
-      "Pega la direccion Worldcoin con fondos, importa el firmante y RC Wallet mostrara la ruta real para mover.",
+      "Objetivo principal: mover fondos de la direccion Worldcoin en Ethereum y otras redes EVM.",
   });
 
   const selectedAsset = useMemo(
@@ -1805,8 +1846,8 @@ export default function App() {
 
   const filteredAssets = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return assets.filter(
-      (asset) => {
+    return assets
+      .filter((asset) => {
         const matchesNetwork =
           networkFilter === "all" || String(asset.chainId) === networkFilter;
         const matchesQuery =
@@ -1816,8 +1857,8 @@ export default function App() {
           asset.address?.toLowerCase().includes(query);
 
         return matchesNetwork && matchesQuery;
-      },
-    );
+      })
+      .sort(sortAssetsForRecovery);
   }, [assets, networkFilter, search]);
 
   const externalControlsSafeTarget = useMemo(
@@ -2009,7 +2050,10 @@ export default function App() {
     };
   }, [assets, networkStates]);
 
-  const homeAssets = useMemo(() => assets.slice(0, 5), [assets]);
+  const homeAssets = useMemo(
+    () => [...assets].sort(sortAssetsForRecovery).slice(0, 5),
+    [assets],
+  );
 
   const viewClass = useCallback(
     (tabId) =>
@@ -3965,6 +4009,66 @@ export default function App() {
       isValidEvmAddressInput(recipient),
   );
 
+  const openCounterfactualSafeDeployFlow = useCallback(() => {
+    openSendForm();
+
+    if (!selectedAsset) return;
+
+    if (!selectedAssetUsesCounterfactualSafeOwnerSigner) {
+      showStatus(
+        "Para desplegar la Safe primero importa o conecta la llave owner de World App.",
+        "warning",
+      );
+      return;
+    }
+
+    if (!selectedAssetCounterfactualSafeReady) {
+      showStatus(
+        "RC Wallet detecto una Safe espejo, pero aun falta prediccion exacta o datos de creacion verificables para desplegarla.",
+        "warning",
+      );
+      return;
+    }
+
+    if (!isValidEvmAddressInput(recipient)) {
+      showStatus(
+        "Completa la wallet destino antes de desplegar la Safe y mover fondos.",
+        "warning",
+      );
+      return;
+    }
+
+    if (!feeBreakdown) {
+      showStatus(
+        "Introduce la cantidad que quieres mover antes de desplegar la Safe.",
+        "warning",
+      );
+      return;
+    }
+
+    if (RECOVERY_FEE_BPS > 0n && !feeAccepted) {
+      showStatus(
+        "Acepta la comision visible antes de preparar el despliegue y movimiento.",
+        "warning",
+      );
+      return;
+    }
+
+    if (!canSubmitRecovery || sending) return;
+    setShowSendConfirm(true);
+  }, [
+    canSubmitRecovery,
+    feeAccepted,
+    feeBreakdown,
+    openSendForm,
+    recipient,
+    selectedAsset,
+    selectedAssetCounterfactualSafeReady,
+    selectedAssetUsesCounterfactualSafeOwnerSigner,
+    sending,
+    showStatus,
+  ]);
+
   return (
     <main className="page">
       <div className="shell">
@@ -3973,8 +4077,9 @@ export default function App() {
           <div className="hero__copy">
             <h1>RC Wallet External</h1>
             <p>
-              Detecta activos EVM y habilita movimientos únicamente cuando
-              existe una firma válida para la red correspondiente.
+              Mueve fondos de tu direccion Worldcoin en Ethereum y otras redes
+              EVM cuando existe llave exacta, owner Safe o despliegue Safe
+              compatible.
             </p>
           </div>
           <button
@@ -5026,8 +5131,9 @@ export default function App() {
 
             <p className="market-disclaimer">
               Mercado solo informativo. La funcion principal de RC Wallet
-              External es mover fondos desde la direccion Worldcoin cuando
-              exista firma exacta u owner Safe valido.
+              External es mover fondos desde la direccion Worldcoin en Ethereum
+              y redes externas cuando exista firma exacta, owner Safe valido o
+              despliegue Safe compatible.
             </p>
 
             <button
@@ -5242,6 +5348,7 @@ export default function App() {
                 asset={selectedAsset}
                 targetAddress={targetAddress}
                 connectedExternalAddress={connectedExternalAddress}
+                onDeploySafeMirror={openCounterfactualSafeDeployFlow}
                 onCopyPlan={copySelectedRescuePlan}
                 onCopySafeUiDraft={copySafeUiTransactionDraft}
                 onConfirmSafeTx={confirmSelectedSafeTransaction}
