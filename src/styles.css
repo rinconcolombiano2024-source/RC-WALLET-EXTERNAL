@@ -1376,6 +1376,85 @@ summary:focus-visible {
   line-height: 1.35;
 }
 
+.execution-route {
+  display: grid;
+  gap: 11px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(82, 150, 255, 0.28);
+  border-radius: 14px;
+  padding: 13px;
+  background:
+    linear-gradient(145deg, rgba(37, 99, 235, 0.14), transparent 54%),
+    #0b121c;
+}
+
+.execution-route--ready {
+  border-color: rgba(52, 211, 153, 0.36);
+  background:
+    linear-gradient(145deg, rgba(25, 135, 84, 0.16), transparent 54%),
+    #0b1514;
+}
+
+.execution-route--warning,
+.execution-route--pending {
+  border-color: rgba(240, 185, 11, 0.34);
+  background:
+    linear-gradient(145deg, rgba(240, 185, 11, 0.13), transparent 54%),
+    #171407;
+}
+
+.execution-route--blocked {
+  border-color: rgba(240, 97, 117, 0.38);
+  background:
+    linear-gradient(145deg, rgba(240, 97, 117, 0.14), transparent 54%),
+    #1b0d12;
+}
+
+.execution-route strong {
+  display: block;
+  margin-top: 3px;
+  color: #fff;
+  font-size: 18px;
+}
+
+.execution-route p {
+  margin: 6px 0 0;
+  color: #b8c4d6;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.execution-route dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.execution-route dl div {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  padding: 9px;
+  background: rgba(0, 0, 0, 0.17);
+}
+
+.execution-route dt {
+  color: #89a0bd;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.execution-route dd {
+  margin: 4px 0 0;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
 .safe-rescue {
   display: grid;
   gap: 12px;
@@ -1532,6 +1611,91 @@ summary:focus-visible {
   text-overflow: ellipsis;
 }
 
+.manual-safe-lab {
+  display: grid;
+  gap: 11px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(240, 185, 11, 0.32);
+  border-radius: 14px;
+  padding: 13px;
+  background:
+    linear-gradient(145deg, rgba(240, 185, 11, 0.1), transparent 55%),
+    #141207;
+  color: #f4df9b;
+}
+
+.safe-forge-lab {
+  border-color: rgba(96, 165, 250, 0.34);
+  background:
+    linear-gradient(145deg, rgba(37, 99, 235, 0.13), transparent 55%),
+    #091321;
+  color: #d9e8ff;
+}
+
+.safe-forge-lab p {
+  color: #b9cae3;
+}
+
+.manual-safe-lab strong {
+  display: block;
+  margin-top: 3px;
+  color: #fff;
+  font-size: 17px;
+}
+
+.manual-safe-lab p {
+  margin: 6px 0 0;
+  color: #dccb91;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.manual-safe-lab code {
+  color: #fff;
+}
+
+.manual-safe-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.manual-safe-grid .label {
+  margin: 0;
+}
+
+.manual-safe-grid__wide {
+  grid-column: 1 / -1;
+}
+
+.manual-safe-textarea {
+  min-height: 88px;
+  padding-top: 12px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.manual-safe-status {
+  margin: 0;
+  border-radius: 11px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.18);
+  overflow-wrap: anywhere;
+}
+
+.manual-safe-status--success {
+  color: #7ce7b4;
+}
+
+.manual-safe-status--warning {
+  color: #f4cf6a;
+}
+
+.manual-safe-status--error {
+  color: #ff9bab;
+}
+
 .recovery-explanation {
   margin-bottom: 16px;
   border: 1px solid #675426;
@@ -1592,6 +1756,28 @@ summary:focus-visible {
   display: grid;
   gap: 8px;
   margin-top: 10px;
+}
+
+.gas-payer-box {
+  display: grid;
+  gap: 8px;
+  margin-top: 11px;
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  border-radius: 12px;
+  padding: 11px;
+  background: rgba(8, 20, 36, 0.76);
+  color: #d9e8ff;
+}
+
+.gas-payer-box strong {
+  color: #8fc2ff;
+}
+
+.gas-payer-box p {
+  margin: 0;
+  color: #b9cae3;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .qr-actions {
@@ -2609,7 +2795,8 @@ footer {
     grid-template-columns: 1fr;
   }
 
-  .rescue-diagnosis dl {
+  .rescue-diagnosis dl,
+  .execution-route dl {
     grid-template-columns: 1fr;
   }
 
@@ -2646,6 +2833,7 @@ footer {
   .diagnostic-grid,
   .home-login-actions,
   .local-key-box .input-row,
+  .manual-safe-grid,
   .rcpl-grid,
   .rcpl-math,
   .token-info-grid,

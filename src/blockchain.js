@@ -20,7 +20,12 @@ const ERC20_INTERFACE = new ethers.Interface(ERC20_ABI);
 const SAFE_PROXY_FACTORY_INTERFACE = new ethers.Interface(
   SAFE_PROXY_FACTORY_ABI,
 );
+const SAFE_SETUP_INTERFACE = new ethers.Interface([
+  "function setup(address[] _owners,uint256 _threshold,address to,bytes data,address fallbackHandler,address paymentToken,uint256 payment,address paymentReceiver)",
+]);
 const SAFE_PROXY_CREATION_TOPIC = ethers.id("ProxyCreation(address,address)");
+const SAFE_FALLBACK_HANDLER_STORAGE_SLOT =
+  "0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5";
 const BPS_DENOMINATOR = 10_000n;
 const GAS_LIMIT_BUFFER_BPS = 12_000n;
 const GAS_PRICE_BUFFER_BPS = 12_000n;
@@ -454,6 +459,39 @@ function createSafeDeploymentSalt({
   return ethers.keccak256(ethers.concat(parts));
 }
 
+function computeSafeProxyAddress({
+  factory,
+  proxyCreationCode,
+  singleton,
+  initializer,
+  saltNonce,
+  callback,
+  method,
+  chainId,
+}) {
+  const factoryAddress = normalizeAddress(factory);
+  const deploymentCode = ethers.concat([
+    proxyCreationCode,
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["address"],
+      [normalizeAddress(singleton)],
+    ),
+  ]);
+  const salt = createSafeDeploymentSalt({
+    method,
+    initializer,
+    saltNonce,
+    callback,
+    chainId,
+  });
+
+  return ethers.getCreate2Address(
+    factoryAddress,
+    salt,
+    ethers.keccak256(deploymentCode),
+  );
+}
+
 async function predictSafeProxyAddress({
   provider,
   factory,
@@ -475,26 +513,17 @@ async function predictSafeProxyAddress({
     7_000,
     "Safe proxyCreationCode",
   );
-  const deploymentCode = ethers.concat([
+
+  return computeSafeProxyAddress({
+    factory: factoryAddress,
     proxyCreationCode,
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address"],
-      [normalizeAddress(singleton)],
-    ),
-  ]);
-  const salt = createSafeDeploymentSalt({
-    method,
+    singleton,
     initializer,
     saltNonce,
     callback,
+    method,
     chainId,
   });
-
-  return ethers.getCreate2Address(
-    factoryAddress,
-    salt,
-    ethers.keccak256(deploymentCode),
-  );
 }
 
 async function getSafeProxyCreationLogs(provider, factory, proxy) {
@@ -800,6 +829,369 @@ async function buildDeploymentFromCreation({
     sourceUrl: creation.sourceUrl,
     predictedSourceAddress,
     canReplayCrossChain: !isChainSpecificSafeCreationMethod(parsed.method),
+  };
+}
+
+export async function validateManualSafeMirrorDeployment({
+  network,
+  targetAddress,
+  manualDeployment,
+}) {
+  if (!network) {
+    throw new Error("Selecciona la red donde estan los fondos");
+  }
+
+  const worldNetwork = NETWORKS.find(
+    (item) => item.chainId === WORLD_CHAIN_ID,
+  );
+  if (!worldNetwork) {
+    throw new Error("World Chain no esta configurada");
+  }
+
+  const safeAddress = normalizeAddress(targetAddress);
+  const method = manualDeployment?.method || "createProxyWithNonce";
+  if (!SAFE_SUPPORTED_CREATION_METHODS.has(method)) {
+    throw new Error("Metodo de creacion Safe no soportado");
+  }
+
+  const factory = normalizeAddress(manualDeployment?.factory);
+  const singleton = normalizeAddress(manualDeployment?.singleton);
+  const initializer = String(manualDeployment?.initializer ?? "").trim();
+  if (!ethers.isHexString(initializer)) {
+    throw new Error("Initializer debe ser bytes hexadecimales 0x...");
+  }
+
+  const saltNonce = BigInt(manualDeployment?.saltNonce ?? "");
+  const callback =
+    method === "createProxyWithCallback"
+      ? normalizeAddress(manualDeployment?.callback)
+      : manualDeployment?.callback
+        ? normalizeAddress(manualDeployment.callback)
+        : null;
+
+  const [worldProvider, targetProvider] = await Promise.all([
+    getProvider(worldNetwork),
+    getProvider(network),
+  ]);
+  const [predictedSourceAddress, targetPrediction] = await Promise.all([
+    predictSafeProxyAddress({
+      provider: worldProvider,
+      factory,
+      singleton,
+      initializer,
+      saltNonce: saltNonce.toString(),
+      callback,
+      method,
+      chainId: WORLD_CHAIN_ID,
+    }),
+    predictSafeProxyAddress({
+      provider: targetProvider,
+      factory,
+      singleton,
+      initializer,
+      saltNonce: saltNonce.toString(),
+      callback,
+      method,
+      chainId: network.chainId,
+    }),
+  ]);
+
+  if (!safeSameAddressForCore(predictedSourceAddress, safeAddress)) {
+    throw new Error(
+      "Los datos manuales no recrean la Safe original de World Chain en la direccion con fondos",
+    );
+  }
+
+  const [targetFactoryCode, targetSingletonCode] = await Promise.all([
+    timeout(targetProvider.getCode(factory), 7_000, "Safe factory target code"),
+    timeout(
+      targetProvider.getCode(singleton),
+      7_000,
+      "Safe singleton target code",
+    ),
+  ]);
+  const targetFactoryHasCode = Boolean(
+    targetFactoryCode && targetFactoryCode !== "0x",
+  );
+  const targetSingletonHasCode = Boolean(
+    targetSingletonCode && targetSingletonCode !== "0x",
+  );
+  const canReplayCrossChain = !isChainSpecificSafeCreationMethod(method);
+  const targetPredictionMatches = safeSameAddressForCore(
+    targetPrediction,
+    safeAddress,
+  );
+
+  return {
+    method,
+    factory,
+    singleton,
+    initializer,
+    saltNonce: saltNonce.toString(),
+    callback,
+    factoryVersion: "manual",
+    sourceChainId: WORLD_CHAIN_ID,
+    sourceTransactionHash: null,
+    sourceUrl: "manual-safe-rescue-lab",
+    predictedSourceAddress,
+    targetChainId: network.chainId,
+    targetNetworkName: network.name,
+    targetPrediction,
+    targetPredictionMatches,
+    targetFactoryHasCode,
+    targetSingletonHasCode,
+    canReplayCrossChain,
+    ready:
+      canReplayCrossChain &&
+      targetPredictionMatches &&
+      targetFactoryHasCode &&
+      targetSingletonHasCode,
+  };
+}
+
+function addressFromStorageSlot(value) {
+  if (!ethers.isHexString(value, 32)) return ethers.ZeroAddress;
+  const address = normalizeAddress(`0x${value.slice(-40)}`);
+  return address === ethers.ZeroAddress ? ethers.ZeroAddress : address;
+}
+
+async function readSafeProxySingleton(provider, safeAddress) {
+  const slot = await timeout(
+    provider.getStorage(safeAddress, 0n),
+    7_000,
+    "Safe singleton storage",
+  );
+  const singleton = addressFromStorageSlot(slot);
+  if (singleton === ethers.ZeroAddress) {
+    throw new Error("No se pudo leer el singleton de la Safe original");
+  }
+  return singleton;
+}
+
+async function readSafeFallbackHandler(provider, safeAddress) {
+  const slot = await timeout(
+    provider.getStorage(safeAddress, SAFE_FALLBACK_HANDLER_STORAGE_SLOT),
+    7_000,
+    "Safe fallback handler storage",
+  );
+  return addressFromStorageSlot(slot);
+}
+
+function buildSafeSetupInitializer({
+  owners,
+  threshold,
+  fallbackHandler,
+  setupTo = ethers.ZeroAddress,
+  setupData = "0x",
+}) {
+  const normalizedOwners = owners.map(normalizeAddress);
+  const normalizedThreshold = BigInt(threshold);
+  const normalizedSetupTo = setupTo ? normalizeAddress(setupTo) : ethers.ZeroAddress;
+  const normalizedData =
+    typeof setupData === "string" && ethers.isHexString(setupData)
+      ? setupData
+      : "0x";
+
+  return SAFE_SETUP_INTERFACE.encodeFunctionData("setup", [
+    normalizedOwners,
+    normalizedThreshold,
+    normalizedSetupTo,
+    normalizedData,
+    fallbackHandler ? normalizeAddress(fallbackHandler) : ethers.ZeroAddress,
+    ethers.ZeroAddress,
+    0n,
+    ethers.ZeroAddress,
+  ]);
+}
+
+function parseSaltSearchLimit(value, fallback) {
+  const parsed = BigInt(value ?? fallback);
+  if (parsed < 0n) throw new Error("El salt nonce no puede ser negativo");
+  return parsed;
+}
+
+export async function forgeSafeMirrorDeployment({
+  network,
+  targetAddress,
+  saltNonceStart = "0",
+  saltNonceEnd = "5000",
+  setupTo = ethers.ZeroAddress,
+  setupData = "0x",
+  extraFallbackHandlers = [],
+}) {
+  if (!network) {
+    throw new Error("Selecciona la red donde estan los fondos");
+  }
+
+  const worldNetwork = NETWORKS.find(
+    (item) => item.chainId === WORLD_CHAIN_ID,
+  );
+  if (!worldNetwork) {
+    throw new Error("World Chain no esta configurada");
+  }
+
+  const safeAddress = normalizeAddress(targetAddress);
+  const start = parseSaltSearchLimit(saltNonceStart, "0");
+  const end = parseSaltSearchLimit(saltNonceEnd, "5000");
+  if (end < start) {
+    throw new Error("El rango de salt nonce esta invertido");
+  }
+  if (end - start > 100_000n) {
+    throw new Error("Usa un rango maximo de 100000 intentos por busqueda");
+  }
+
+  const [worldProvider, targetProvider] = await Promise.all([
+    getProvider(worldNetwork),
+    getProvider(network),
+  ]);
+  const worldCode = await timeout(
+    worldProvider.getCode(safeAddress),
+    7_000,
+    "World Chain Safe code",
+  );
+  const worldSafe = await inspectSafeAccount(
+    worldProvider,
+    safeAddress,
+    Boolean(worldCode && worldCode !== "0x"),
+  );
+  if (!worldSafe.detected) {
+    throw new Error("La direccion no fue detectada como Safe en World Chain");
+  }
+
+  const [singleton, currentFallbackHandler] = await Promise.all([
+    readSafeProxySingleton(worldProvider, safeAddress),
+    readSafeFallbackHandler(worldProvider, safeAddress),
+  ]);
+  const fallbackHandlers = [
+    ethers.ZeroAddress,
+    currentFallbackHandler,
+    ...extraFallbackHandlers.filter((item) => item && ethers.isAddress(item)),
+  ].filter(
+    (item, index, list) =>
+      list.findIndex(
+        (candidate) => normalizeAddress(candidate) === normalizeAddress(item),
+      ) === index,
+  );
+  const methods = ["createProxyWithNonce", "createProxyWithNonceL2"];
+  const attempts = Number((end - start + 1n) * BigInt(fallbackHandlers.length) * BigInt(methods.length) * BigInt(SAFE_FACTORY_CANDIDATES.length));
+
+  for (const candidate of SAFE_FACTORY_CANDIDATES) {
+    const factory = normalizeAddress(candidate.factory);
+    const [worldFactoryCode, targetFactoryCode, targetSingletonCode] =
+      await Promise.all([
+        timeout(worldProvider.getCode(factory), 7_000, "World Safe factory"),
+        timeout(targetProvider.getCode(factory), 7_000, "Target Safe factory"),
+        timeout(
+          targetProvider.getCode(singleton),
+          7_000,
+          "Target Safe singleton",
+        ),
+      ]);
+    if (!worldFactoryCode || worldFactoryCode === "0x") continue;
+    const factoryContract = new ethers.Contract(
+      factory,
+      SAFE_PROXY_FACTORY_ABI,
+      worldProvider,
+    );
+    const proxyCreationCode = await timeout(
+      factoryContract.proxyCreationCode(),
+      7_000,
+      "Safe proxyCreationCode",
+    );
+
+    const targetFactoryHasCode = Boolean(
+      targetFactoryCode && targetFactoryCode !== "0x",
+    );
+    const targetSingletonHasCode = Boolean(
+      targetSingletonCode && targetSingletonCode !== "0x",
+    );
+
+    for (const fallbackHandler of fallbackHandlers) {
+      const initializer = buildSafeSetupInitializer({
+        owners: worldSafe.owners,
+        threshold: worldSafe.threshold,
+        fallbackHandler,
+        setupTo,
+        setupData,
+      });
+
+      for (const method of methods) {
+        for (let saltNonce = start; saltNonce <= end; saltNonce += 1n) {
+          const saltNonceString = saltNonce.toString();
+          const predictedSourceAddress = computeSafeProxyAddress({
+            factory,
+            proxyCreationCode,
+            singleton,
+            initializer,
+            saltNonce: saltNonceString,
+            callback: null,
+            method,
+            chainId: WORLD_CHAIN_ID,
+          });
+
+          if (!safeSameAddressForCore(predictedSourceAddress, safeAddress)) {
+            continue;
+          }
+
+          const targetPrediction = computeSafeProxyAddress({
+            factory,
+            proxyCreationCode,
+            singleton,
+            initializer,
+            saltNonce: saltNonceString,
+            callback: null,
+            method,
+            chainId: network.chainId,
+          });
+          const targetPredictionMatches = safeSameAddressForCore(
+            targetPrediction,
+            safeAddress,
+          );
+
+          return {
+            method,
+            factory,
+            singleton,
+            initializer,
+            saltNonce: saltNonceString,
+            callback: null,
+            factoryVersion: candidate.version,
+            sourceChainId: WORLD_CHAIN_ID,
+            sourceTransactionHash: null,
+            sourceUrl: "safe-forge-auto-reconstruction",
+            predictedSourceAddress,
+            targetChainId: network.chainId,
+            targetNetworkName: network.name,
+            targetPrediction,
+            targetPredictionMatches,
+            targetFactoryHasCode,
+            targetSingletonHasCode,
+            canReplayCrossChain: true,
+            ready:
+              targetPredictionMatches &&
+              targetFactoryHasCode &&
+              targetSingletonHasCode,
+            forge: {
+              attempts,
+              owners: worldSafe.owners,
+              threshold: worldSafe.threshold,
+              fallbackHandler,
+              setupTo: setupTo || ethers.ZeroAddress,
+              setupData: setupData || "0x",
+            },
+          };
+        }
+      }
+    }
+  }
+
+  return {
+    deployment: null,
+    attempts,
+    singleton,
+    fallbackHandlers,
+    owners: worldSafe.owners,
+    threshold: worldSafe.threshold,
   };
 }
 
@@ -1603,6 +1995,7 @@ async function assertCanPaySafeExecutionCosts({
   safeContract,
   execArgs,
   networkSymbol,
+  payerLabel = "owner Safe",
 }) {
   const execData = safeContract.interface.encodeFunctionData(
     "execTransaction",
@@ -1628,7 +2021,7 @@ async function assertCanPaySafeExecutionCosts({
 
   if (nativeBalance < estimatedMaxGasCost) {
     throw new Error(
-      `El owner Safe no tiene gas suficiente. Tiene ${formatBalance(
+      `El ${payerLabel} no tiene gas suficiente. Tiene ${formatBalance(
         nativeBalance,
         18,
         8,
@@ -2440,10 +2833,13 @@ export async function inspectSafeTransactionStatus({ chainId, safeTxHash }) {
   );
 }
 
-export async function executeSafeTransactionFromServiceWithPrivateKeyWallet({
-  privateKey,
+async function executeSafeTransactionFromServiceWithSigner({
+  signer,
+  signerAddress,
+  provider,
   chainId,
   safeTxHash,
+  route,
 }) {
   const normalizedSafeTxHash = normalizeSafeTxHash(safeTxHash);
   const network = networkByChainId(chainId);
@@ -2462,9 +2858,7 @@ export async function executeSafeTransactionFromServiceWithPrivateKeyWallet({
   }
 
   const safeTx = normalizeSafeServiceTransaction(status);
-  const provider = await getProvider(network);
-  const signer = new ethers.Wallet(normalizePrivateKey(privateKey), provider);
-  const signerAddress = normalizeAddress(signer.address);
+  const normalizedSignerAddress = normalizeAddress(signerAddress);
   const safeContract = new ethers.Contract(
     safeTx.safe,
     SAFE_INTROSPECTION_ABI,
@@ -2516,11 +2910,12 @@ export async function executeSafeTransactionFromServiceWithPrivateKeyWallet({
   ];
   const preflight = await assertCanPaySafeExecutionCosts({
     provider,
-    signerAddress,
+    signerAddress: normalizedSignerAddress,
     safeAddress: safeTx.safe,
     safeContract,
     execArgs,
     networkSymbol: network.symbol,
+    payerLabel: "pagador de gas",
   });
   const transaction = await safeContract.execTransaction(...execArgs, {
     gasLimit: BigInt(preflight.gas.bufferedGasLimit),
@@ -2528,17 +2923,61 @@ export async function executeSafeTransactionFromServiceWithPrivateKeyWallet({
   const receipt = await transaction.wait(1);
 
   return {
-    route: "safe-service-execute-private-key",
+    route,
     hash: transaction.hash,
     hashes: [transaction.hash],
     receipt,
     receipts: [receipt],
     safeTxHash: normalizedSafeTxHash,
-    signerAddress,
+    signerAddress: normalizedSignerAddress,
     signaturesUsed: executionSignatures.owners,
     preflight,
     status,
   };
+}
+
+export async function executeSafeTransactionFromServiceWithPrivateKeyWallet({
+  privateKey,
+  chainId,
+  safeTxHash,
+}) {
+  const network = networkByChainId(chainId);
+  const provider = await getProvider(network);
+  const signer = new ethers.Wallet(normalizePrivateKey(privateKey), provider);
+
+  return executeSafeTransactionFromServiceWithSigner({
+    signer,
+    signerAddress: signer.address,
+    provider,
+    chainId,
+    safeTxHash,
+    route: "safe-service-execute-private-key",
+  });
+}
+
+export async function executeSafeTransactionFromServiceWithExternalWallet({
+  provider: externalProvider,
+  chainId,
+  safeTxHash,
+}) {
+  if (!externalProvider?.request) {
+    throw new Error("Conecta una wallet externa para pagar el gas de la Safe Tx");
+  }
+
+  const network = networkByChainId(chainId);
+  await switchExternalNetwork(externalProvider, network);
+
+  const provider = new ethers.BrowserProvider(externalProvider);
+  const signer = await provider.getSigner();
+
+  return executeSafeTransactionFromServiceWithSigner({
+    signer,
+    signerAddress: await signer.getAddress(),
+    provider,
+    chainId,
+    safeTxHash,
+    route: "safe-service-execute-external-gas-payer",
+  });
 }
 
 async function sendWithSafeOwnerSigner({
@@ -2665,6 +3104,135 @@ async function sendWithSafeOwnerSigner({
   };
 }
 
+async function sendWithSafeOwnerSignatureAndExecutor({
+  provider,
+  ownerSigner,
+  ownerSignerAddress,
+  executorSigner,
+  executorAddress,
+  asset,
+  transfer,
+  route,
+}) {
+  const safeState = asset.accountState?.safe;
+  if (!safeState?.detected) {
+    throw new Error("La direccion con fondos no fue detectada como Safe");
+  }
+
+  if (!safeOwnersInclude(asset.accountState, ownerSignerAddress)) {
+    throw new Error(
+      "La llave owner no aparece como owner de la Safe donde estan los fondos",
+    );
+  }
+
+  const safeAddress = transfer.owner;
+  const safeContract = new ethers.Contract(
+    safeAddress,
+    SAFE_INTROSPECTION_ABI,
+    executorSigner,
+  );
+  const [owners, threshold] = await Promise.all([
+    timeout(safeContract.getOwners(), 7_000, "Safe owners"),
+    timeout(safeContract.getThreshold(), 7_000, "Safe threshold"),
+  ]);
+  const liveAccountState = {
+    safe: {
+      detected: true,
+      owners,
+      threshold: Number(threshold),
+    },
+  };
+
+  if (!safeOwnersInclude(liveAccountState, ownerSignerAddress)) {
+    throw new Error(
+      "La red ya no reconoce esta llave como owner de la Safe",
+    );
+  }
+
+  if (Number(threshold) !== 1) {
+    throw new Error(
+      `Esta Safe requiere ${Number(
+        threshold,
+      )} firmas. Usa Safe UI o reune las firmas requeridas antes de ejecutar con pagador externo.`,
+    );
+  }
+
+  const safeTx = buildSingleSafeTransaction(asset, transfer);
+  const safeTxGas = 0n;
+  const baseGas = 0n;
+  const gasPrice = 0n;
+  const gasToken = ethers.ZeroAddress;
+  const refundReceiver = ethers.ZeroAddress;
+  const nonce = await timeout(safeContract.nonce(), 7_000, "Safe nonce");
+  const safeTxHash = await timeout(
+    safeContract.getTransactionHash(
+      safeTx.to,
+      safeTx.value,
+      safeTx.data,
+      safeTx.operation,
+      safeTxGas,
+      baseGas,
+      gasPrice,
+      gasToken,
+      refundReceiver,
+      nonce,
+    ),
+    7_000,
+    "Safe transaction hash",
+  );
+  const signature = await signSafeTransaction({
+    provider,
+    signer: ownerSigner,
+    signerAddress: ownerSignerAddress,
+    safeAddress,
+    safeTx,
+    safeTxGas,
+    baseGas,
+    gasPrice,
+    gasToken,
+    refundReceiver,
+    nonce,
+    safeTxHash,
+  });
+  const execArgs = [
+    safeTx.to,
+    safeTx.value,
+    safeTx.data,
+    safeTx.operation,
+    safeTxGas,
+    baseGas,
+    gasPrice,
+    gasToken,
+    refundReceiver,
+    signature,
+  ];
+  const preflight = await assertCanPaySafeExecutionCosts({
+    provider,
+    signerAddress: executorAddress,
+    safeAddress,
+    safeContract,
+    execArgs,
+    networkSymbol: asset.network.symbol,
+    payerLabel: "pagador de gas",
+  });
+  const transaction = await safeContract.execTransaction(...execArgs, {
+    gasLimit: BigInt(preflight.gas.bufferedGasLimit),
+  });
+  const receipt = await transaction.wait(1);
+
+  return {
+    route,
+    hash: transaction.hash,
+    hashes: [transaction.hash],
+    receipt,
+    receipts: [receipt],
+    safeTxHash,
+    ownerSignerAddress,
+    executorAddress,
+    preflight,
+  };
+}
+
 function getSafeFactoryDeploymentCall(factory, deployment) {
   const method = deployment.method ?? "createProxyWithNonce";
   const saltNonce = BigInt(deployment.saltNonce);
@@ -2743,6 +3311,7 @@ async function deployCounterfactualSafeMirror({
   provider,
   signer,
   signerAddress,
+  ownerSignerAddress = signerAddress,
   asset,
   owner,
   accountState,
@@ -2755,7 +3324,7 @@ async function deployCounterfactualSafeMirror({
     );
   }
 
-  if (!safeMirrorOwnersInclude(accountState, signerAddress)) {
+  if (!safeMirrorOwnersInclude(accountState, ownerSignerAddress)) {
     throw new Error(
       "La llave cargada no aparece como owner de la Safe World App",
     );
@@ -2851,7 +3420,7 @@ async function deployCounterfactualSafeMirror({
   }
 
   const safe = await inspectSafeAccount(provider, safeAddress, true);
-  if (!safe.detected || !safeOwnersInclude({ safe }, signerAddress)) {
+  if (!safe.detected || !safeOwnersInclude({ safe }, ownerSignerAddress)) {
     throw new Error(
       "La Safe desplegada no reconoce esta llave como owner; se detiene antes de mover fondos.",
     );
@@ -2939,6 +3508,132 @@ async function deploySafeMirrorAndSend({
       ...(safeResult.receipts ?? []),
     ],
   };
+}
+
+async function deploySafeMirrorAndSendWithGasPayer({
+  provider,
+  ownerSigner,
+  ownerSignerAddress,
+  executorSigner,
+  executorAddress,
+  asset,
+  transfer,
+  route,
+}) {
+  const deployment = await deployCounterfactualSafeMirror({
+    provider,
+    signer: executorSigner,
+    signerAddress: executorAddress,
+    ownerSignerAddress,
+    asset,
+    owner: transfer.owner,
+    accountState: asset.accountState,
+  });
+  const deployedAsset = {
+    ...asset,
+    accountState: deployment.accountState,
+  };
+  const safeResult = await sendWithSafeOwnerSignatureAndExecutor({
+    provider,
+    ownerSigner,
+    ownerSignerAddress,
+    executorSigner,
+    executorAddress,
+    asset: deployedAsset,
+    transfer,
+    route,
+  });
+
+  return {
+    ...safeResult,
+    deployment,
+    hashes: [...(deployment.hashes ?? []), ...(safeResult.hashes ?? [])],
+    receipts: [
+      ...(deployment.receipts ?? []),
+      ...(safeResult.receipts ?? []),
+    ],
+  };
+}
+
+export async function sendWithPrivateKeyOwnerAndGasPayer({
+  privateKey,
+  gasPayerProvider,
+  asset,
+  targetAddress,
+  recipient,
+  amount,
+  feeRecipient,
+  feeAmountUnits = 0n,
+}) {
+  if (!gasPayerProvider?.request) {
+    throw new Error("La wallet pagadora no expone un proveedor EIP-1193");
+  }
+
+  await switchExternalNetwork(gasPayerProvider, asset.network);
+  const provider = new ethers.BrowserProvider(gasPayerProvider);
+  const executorSigner = await provider.getSigner();
+  const executorAddress = normalizeAddress(await executorSigner.getAddress());
+  const ownerSigner = new ethers.Wallet(normalizePrivateKey(privateKey), provider);
+  const ownerSignerAddress = normalizeAddress(ownerSigner.address);
+  const transfer = prepareTransfer({
+    asset,
+    targetAddress,
+    recipient,
+    amount,
+    feeRecipient,
+    feeAmountUnits,
+  });
+
+  if (ownerSignerAddress === transfer.owner) {
+    throw new Error(
+      "Esta ruta es para Safe: si la llave abre exactamente la direccion con fondos, usa envio directo.",
+    );
+  }
+
+  const refreshedAccountState = await refreshSafeAccountState(
+    provider,
+    asset,
+    transfer.owner,
+  );
+  const safeAsset = {
+    ...asset,
+    accountState: refreshedAccountState,
+  };
+
+  if (safeOwnersInclude(refreshedAccountState, ownerSignerAddress)) {
+    return sendWithSafeOwnerSignatureAndExecutor({
+      provider,
+      ownerSigner,
+      ownerSignerAddress,
+      executorSigner,
+      executorAddress,
+      asset: safeAsset,
+      transfer,
+      route: "safe-owner-private-key-gas-payer",
+    });
+  }
+
+  if (safeMirrorOwnersInclude(refreshedAccountState, ownerSignerAddress)) {
+    return deploySafeMirrorAndSendWithGasPayer({
+      provider,
+      ownerSigner,
+      ownerSignerAddress,
+      executorSigner,
+      executorAddress,
+      asset: safeAsset,
+      transfer,
+      route: "safe-mirror-deploy-private-key-gas-payer",
+    });
+  }
+
+  throw new Error(
+    signerMismatchMessage({
+      asset,
+      owner: transfer.owner,
+      signerAddress: ownerSignerAddress,
+      accountState: refreshedAccountState,
+    }),
+  );
 }
 
 async function sendPreparedTransactions(signer, txRequests) {

@@ -9,6 +9,7 @@ import { ethers } from "ethers";
 import { MiniKit } from "@worldcoin/minikit-js";
 import {
   buildSafeUiTransactionDraft,
+  executeSafeTransactionFromServiceWithExternalWallet,
   confirmSafeTransactionWithPrivateKeyWallet,
   executeSafeTransactionFromServiceWithPrivateKeyWallet,
   formatBalance,
@@ -24,6 +25,9 @@ import {
   scanAllNetworks,
   sendWithExternalWallet,
   sendWithPrivateKeyWallet,
+  sendWithPrivateKeyOwnerAndGasPayer,
+  forgeSafeMirrorDeployment,
+  validateManualSafeMirrorDeployment,
 } from "./blockchain.js";
 import {
   ADMIN_FEE_WALLET,
@@ -710,6 +714,216 @@ function safeSameAddress(left, right) {
   } catch {
     return false;
   }
+}
+
+function getExternalExecutionRoute({
+  asset,
+  targetAddress,
+  connectedExternalAddress,
+  externalConnection,
+  authenticated,
+  miniKitReady,
+  authenticatedWorldAddress,
+  nativeGasAsset,
+}) {
+  if (!asset) {
+    return {
+      id: "none",
+      level: "pending",
+      canExecute: false,
+      label: "Selecciona un token",
+      actionLabel: "Selecciona token",
+      signerLabel: "Pendiente",
+      gasLabel: "Pendiente",
+      reason: "Selecciona un activo con balance para calcular la ruta real.",
+    };
+  }
+
+  const isWorldChain = asset.chainId === WORLD_CHAIN_ID;
+  const exactSigner = safeSameAddress(targetAddress, connectedExternalAddress);
+  const hasExternalSigner = Boolean(externalConnection || connectedExternalAddress);
+  const hasNativeGas = asset.isNative || Boolean(nativeGasAsset?.rawBalance > 0n);
+  const worldSessionReady = Boolean(
+    isWorldChain &&
+      authenticated &&
+      miniKitReady &&
+      safeSameAddress(authenticatedWorldAddress, targetAddress),
+  );
+  const safe = asset.accountState?.safe;
+  const safeDetected = Boolean(safe?.detected);
+  const safeThreshold = Number(safe?.threshold ?? 0);
+  const safeOwner = Boolean(
+    connectedExternalAddress &&
+      !exactSigner &&
+      safeOwnersInclude(asset.accountState, connectedExternalAddress),
+  );
+  const mirror = asset.accountState?.counterfactualSafe;
+  const mirrorDetected = Boolean(mirror?.detected);
+  const mirrorThreshold = Number(mirror?.threshold ?? 0);
+  const mirrorOwner = Boolean(
+    connectedExternalAddress &&
+      !exactSigner &&
+      safeMirrorOwnersInclude(asset.accountState, connectedExternalAddress),
+  );
+  const mirrorReady = Boolean(
+    mirrorOwner &&
+      mirror?.deployment?.ready &&
+      mirror?.deployment?.targetPredictionMatches,
+  );
+  const networkName = asset.networkName || asset.network?.name || "esta red";
+  const gasSymbol = asset.network?.symbol || "gas";
+
+  if (exactSigner) {
+    if (!hasExternalSigner) {
+      return {
+        id: "direct-eoa-missing-signer",
+        level: "pending",
+        canExecute: false,
+        label: "Llave exacta pendiente",
+        actionLabel: "Importar llave exacta",
+        signerLabel: "Falta firmante local o wallet externa",
+        gasLabel: hasNativeGas ? "Gas detectado" : `Falta ${gasSymbol}`,
+        reason:
+          "La direccion coincide, pero RC Wallet necesita una conexion activa para firmar.",
+      };
+    }
+
+    if (!hasNativeGas) {
+      return {
+        id: "direct-eoa-missing-gas",
+        level: "warning",
+        canExecute: false,
+        label: `Falta gas en ${networkName}`,
+        actionLabel: `Agrega ${gasSymbol} para gas`,
+        signerLabel: "Llave exacta conectada",
+        gasLabel: `Falta ${gasSymbol}`,
+        reason: `La llave abre la direccion con fondos, pero para mover ${asset.symbol} necesitas ${gasSymbol} en esa misma direccion.`,
+      };
+    }
+
+    return {
+      id: "direct-eoa",
+      level: "ready",
+      canExecute: true,
+      label: `Envio directo en ${networkName}`,
+      actionLabel: `Enviar directo en ${networkName}`,
+      signerLabel: "Llave exacta / wallet externa",
+      gasLabel: asset.isNative ? "Reserva gas del balance" : "Gas detectado",
+      reason:
+        "La firma conectada coincide exactamente con la direccion donde estan los fondos.",
+    };
+  }
+
+  if (isWorldChain && worldSessionReady) {
+    return {
+      id: "world-minikit",
+      level: "ready",
+      canExecute: true,
+      label: "Firma World App disponible",
+      actionLabel: "Firmar con World App",
+      signerLabel: "MiniKit / World App",
+      gasLabel: "World App calcula la operacion",
+      reason:
+        "La sesion de World App coincide con la direccion origen en World Chain.",
+    };
+  }
+
+  if (safeDetected && safeOwner && safeThreshold === 1) {
+    return {
+      id: "deployed-safe",
+      level: "ready",
+      canExecute: true,
+      label: `Safe lista en ${networkName}`,
+      actionLabel: `Ejecutar Safe en ${networkName}`,
+      signerLabel: "Owner Safe conectado",
+      gasLabel: "Gas lo paga el owner",
+      reason:
+        "La direccion con fondos es una Safe desplegada y el firmante conectado es owner con umbral 1/1.",
+    };
+  }
+
+  if (safeDetected && safeOwner) {
+    return {
+      id: "deployed-safe-needs-signatures",
+      level: "warning",
+      canExecute: false,
+      label: "Safe requiere mas firmas",
+      actionLabel: "Reunir firmas Safe",
+      signerLabel: "Owner Safe conectado",
+      gasLabel: "Gas al ejecutar",
+      reason: `Esta Safe requiere ${safeThreshold || "varias"} firmas. Crea la transaccion Safe y reune las confirmaciones antes de ejecutar.`,
+    };
+  }
+
+  if (mirrorDetected && mirrorOwner && mirrorThreshold === 1 && mirrorReady) {
+    return {
+      id: "counterfactual-safe",
+      level: "ready",
+      canExecute: true,
+      label: `Safe desplegable en ${networkName}`,
+      actionLabel: `Desplegar Safe y mover en ${networkName}`,
+      signerLabel: "Owner Safe World App",
+      gasLabel: "Gas lo paga el owner",
+      reason:
+        "La Safe original fue detectada, la llave es owner y la prediccion coincide exactamente con la direccion que tiene los fondos.",
+    };
+  }
+
+  if (mirrorDetected && mirrorOwner) {
+    return {
+      id: "counterfactual-safe-not-ready",
+      level: "warning",
+      canExecute: false,
+      label: "Safe espejo no validada",
+      actionLabel: "Validar Safe antes de enviar",
+      signerLabel: "Owner Safe World App",
+      gasLabel: "Pendiente",
+      reason:
+        "La llave aparece como owner, pero falta factory, singleton, salt o prediccion exacta para desplegar sin riesgo.",
+    };
+  }
+
+  if (safeDetected || mirrorDetected) {
+    return {
+      id: "safe-owner-missing",
+      level: "blocked",
+      canExecute: false,
+      label: "Sin owner Safe valido",
+      actionLabel: "Sin autoridad para mover",
+      signerLabel: connectedExternalAddress
+        ? "Firmante no es owner"
+        : "Falta owner Safe",
+      gasLabel: "No aplica",
+      reason:
+        "La direccion parece Safe o smart account. Solo un owner valido o las firmas requeridas pueden mover estos fondos.",
+    };
+  }
+
+  if (connectedExternalAddress) {
+    return {
+      id: "wrong-signer",
+      level: "blocked",
+      canExecute: false,
+      label: "La llave no corresponde",
+      actionLabel: "Sin autoridad para mover",
+      signerLabel: "Firmante diferente",
+      gasLabel: "No aplica",
+      reason:
+        "La llave conectada no abre la direccion con fondos y tampoco fue detectada como owner Safe.",
+    };
+  }
+
+  return {
+    id: "missing-signer",
+    level: "pending",
+    canExecute: false,
+    label: "Falta firmante",
+    actionLabel: "Importar llave World App",
+    signerLabel: "Falta llave o wallet owner",
+    gasLabel: "Pendiente",
+    reason:
+      "Importa la llave exportada por World App o conecta una wallet owner para verificar autoridad real.",
+  };
 }
 
 function signerControlsSafeTarget({
@@ -1764,6 +1978,7 @@ export default function App() {
   const mountedRef = useRef(false);
   const scanIdRef = useRef(0);
   const externalConnectionRef = useRef(null);
+  const gasPayerConnectionRef = useRef(null);
   const privateKeyRef = useRef("");
   const installPromptRef = useRef(null);
   const autoLoginAttemptedRef = useRef(false);
@@ -1785,9 +2000,28 @@ export default function App() {
     useState("");
   const [externalConnectionName, setExternalConnectionName] = useState("");
   const [externalConnecting, setExternalConnecting] = useState(false);
+  const [gasPayerAddress, setGasPayerAddress] = useState("");
+  const [gasPayerName, setGasPayerName] = useState("");
+  const [gasPayerConnecting, setGasPayerConnecting] = useState(false);
   const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [privateKeyTargetAddressInput, setPrivateKeyTargetAddressInput] =
     useState("");
+  const [manualSafeMethod, setManualSafeMethod] =
+    useState("createProxyWithNonce");
+  const [manualSafeFactory, setManualSafeFactory] = useState("");
+  const [manualSafeSingleton, setManualSafeSingleton] = useState("");
+  const [manualSafeInitializer, setManualSafeInitializer] = useState("");
+  const [manualSafeSaltNonce, setManualSafeSaltNonce] = useState("");
+  const [manualSafeCallback, setManualSafeCallback] = useState("");
+  const [manualSafeStatus, setManualSafeStatus] = useState(null);
+  const [manualSafeBusy, setManualSafeBusy] = useState(false);
+  const [safeForgeStart, setSafeForgeStart] = useState("0");
+  const [safeForgeEnd, setSafeForgeEnd] = useState("5000");
+  const [safeForgeSetupTo, setSafeForgeSetupTo] = useState("");
+  const [safeForgeSetupData, setSafeForgeSetupData] = useState("0x");
+  const [safeForgeExtraHandlers, setSafeForgeExtraHandlers] = useState("");
+  const [safeForgeStatus, setSafeForgeStatus] = useState(null);
+  const [safeForgeBusy, setSafeForgeBusy] = useState(false);
   const [assets, setAssets] = useState([]);
   const [networkStates, setNetworkStates] = useState({});
   const [selectedAssetId, setSelectedAssetId] = useState("");
@@ -1963,6 +2197,30 @@ export default function App() {
         ? getNativeGasAsset(assets, selectedAsset.chainId)
         : null,
     [assets, selectedAsset],
+  );
+
+  const externalExecutionRoute = useMemo(
+    () =>
+      getExternalExecutionRoute({
+        asset: selectedAsset,
+        targetAddress,
+        connectedExternalAddress,
+        externalConnection: externalConnectionRef.current,
+        authenticated,
+        miniKitReady,
+        authenticatedWorldAddress,
+        nativeGasAsset: selectedNativeGasAsset,
+      }),
+    [
+      authenticated,
+      authenticatedWorldAddress,
+      connectedExternalAddress,
+      externalConnectionName,
+      miniKitReady,
+      selectedAsset,
+      selectedNativeGasAsset,
+      targetAddress,
+    ],
   );
 
   const bridgeDestinationOptions = useMemo(
@@ -2452,6 +2710,7 @@ export default function App() {
       mountedRef.current = false;
       scanIdRef.current += 1;
       externalConnectionRef.current?.cleanup?.();
+      gasPayerConnectionRef.current?.cleanup?.();
       qrScanActiveRef.current = false;
       stopQrScannerStream(qrStreamRef.current);
     };
@@ -2945,6 +3204,59 @@ export default function App() {
     );
   }, [connectExternal, showStatus, walletConnectConfigured]);
 
+  const connectGasPayerWallet = useCallback(
+    async (method = "injected") => {
+      try {
+        setGasPayerConnecting(true);
+        await disconnectExternalProvider(gasPayerConnectionRef.current);
+
+        const handlers = {
+          onAccount: (account) => {
+            if (mountedRef.current) setGasPayerAddress(account);
+          },
+          onDisconnect: () => {
+            if (mountedRef.current) {
+              gasPayerConnectionRef.current = null;
+              setGasPayerAddress("");
+              setGasPayerName("");
+            }
+          },
+        };
+
+        const connection =
+          method === "walletconnect"
+            ? await connectWalletConnectProvider(handlers)
+            : await connectInjectedProvider(handlers);
+
+        gasPayerConnectionRef.current = connection;
+        setGasPayerAddress(connection.account);
+        setGasPayerName(connection.name);
+        showStatus(
+          `Pagador de gas conectado: ${compactAddress(connection.account)}. Esta wallet pagara despliegue/ejecucion Safe cuando el owner firme con la llave World App.`,
+          "success",
+        );
+      } catch (error) {
+        showStatus(
+          error instanceof Error
+            ? error.message
+            : "No se pudo conectar el pagador de gas",
+          "error",
+        );
+      } finally {
+        if (mountedRef.current) setGasPayerConnecting(false);
+      }
+    },
+    [showStatus],
+  );
+
+  const disconnectGasPayerWallet = useCallback(async () => {
+    await disconnectExternalProvider(gasPayerConnectionRef.current);
+    gasPayerConnectionRef.current = null;
+    setGasPayerAddress("");
+    setGasPayerName("");
+    showStatus("Pagador de gas desconectado.");
+  }, [showStatus]);
+
   const stopQrScanner = useCallback(() => {
     qrScanActiveRef.current = false;
     stopQrScannerStream(qrStreamRef.current);
@@ -3241,11 +3553,18 @@ export default function App() {
         );
       }
 
+      if (!externalExecutionRoute.canExecute) {
+        throw new Error(
+          externalExecutionRoute.reason ||
+            "RC Wallet no encontro autoridad valida para mover estos fondos.",
+        );
+      }
+
       setSending(true);
       setLastTransaction(null);
 
       let result;
-      if (selectedAsset.chainId === WORLD_CHAIN_ID && !externalMatches) {
+      if (externalExecutionRoute.id === "world-minikit") {
         result = await sendFromWorldChain(
           selectedAsset,
           destination,
@@ -3254,23 +3573,52 @@ export default function App() {
         );
       } else {
         const externalConnection = externalConnectionRef.current;
-        if (
-          (!externalMatches && !selectedAssetCounterfactualSafeReady) ||
-          !externalConnection
-        ) {
+        if (!externalConnection) {
+          throw new Error(
+            externalExecutionRoute.reason ||
+              "Conecta la llave o wallet owner antes de firmar.",
+          );
           throw new Error(
             "Conecta una wallet externa que exponga exactamente la dirección con fondos",
           );
         }
 
         showStatus(
-          selectedAssetCounterfactualSafeReady
+          externalExecutionRoute.id === "counterfactual-safe"
             ? `Desplegando Safe en ${selectedAsset.networkName} y preparando movimiento...`
+            : externalExecutionRoute.id === "deployed-safe"
+            ? `Ejecutando Safe en ${selectedAsset.networkName}...`
             : externalConnection.type === "private-key"
             ? `Firmando localmente en ${selectedAsset.networkName}...`
             : `Abriendo la firma externa en ${selectedAsset.networkName}…`,
         );
         if (externalConnection.type === "private-key") {
+          const gasPayerConnection = gasPayerConnectionRef.current;
+          const useGasPayer =
+            gasPayerConnection?.provider &&
+            !safeSameAddress(connectedExternalAddress, targetAddress) &&
+            (selectedAssetUsesSafeOwnerSigner ||
+              selectedAssetUsesCounterfactualSafeOwnerSigner ||
+              selectedAssetCounterfactualSafeReady);
+
+          if (useGasPayer) {
+            showStatus(
+              `Owner Safe firma localmente y ${compactAddress(gasPayerConnection.account)} paga gas en ${selectedAsset.networkName}...`,
+            );
+            result = {
+              route: "local-private-key-gas-payer",
+              ...(await sendWithPrivateKeyOwnerAndGasPayer({
+                privateKey: privateKeyRef.current || externalConnection.privateKey,
+                gasPayerProvider: gasPayerConnection.provider,
+                asset: selectedAsset,
+                targetAddress,
+                recipient: destination,
+                amount: cleanAmount,
+                feeRecipient: ADMIN_FEE_WALLET,
+                feeAmountUnits,
+              })),
+            };
+          } else {
           result = {
             route: "local-private-key",
             ...(await sendWithPrivateKeyWallet({
@@ -3283,6 +3631,7 @@ export default function App() {
               feeAmountUnits,
             })),
           };
+          }
         } else {
           if (!externalConnection.provider) {
             throw new Error("La wallet externa no expone un firmante valido");
@@ -3342,8 +3691,11 @@ export default function App() {
     }
   }, [
     amount,
+    connectedExternalAddress,
+    externalExecutionRoute,
     externalMatches,
     feeAccepted,
+    gasPayerAddress,
     recipient,
     scan,
     selectedAsset,
@@ -3680,16 +4032,23 @@ export default function App() {
       if (!selectedAsset) {
         throw new Error("Selecciona primero una Safe desplegada.");
       }
-      if (!privateKeyRef.current) {
+      const externalGasPayerProvider = gasPayerConnectionRef.current?.provider;
+      if (!privateKeyRef.current && !externalGasPayerProvider) {
         throw new Error(
-          "Para ejecutar una Safe Tx desde RC Wallet importa una llave con gas para esta red.",
+          "Para ejecutar una Safe Tx conecta un pagador de gas o importa una llave con gas para esta red.",
         );
       }
-      const result = await executeSafeTransactionFromServiceWithPrivateKeyWallet({
-        privateKey: privateKeyRef.current,
-        chainId: selectedAsset.chainId,
-        safeTxHash: safeTxHashInput,
-      });
+      const result = externalGasPayerProvider
+        ? await executeSafeTransactionFromServiceWithExternalWallet({
+            provider: externalGasPayerProvider,
+            chainId: selectedAsset.chainId,
+            safeTxHash: safeTxHashInput,
+          })
+        : await executeSafeTransactionFromServiceWithPrivateKeyWallet({
+            privateKey: privateKeyRef.current,
+            chainId: selectedAsset.chainId,
+            safeTxHash: safeTxHashInput,
+          });
 
       const transactionRecord = {
         ...result,
@@ -3733,7 +4092,7 @@ export default function App() {
         "error",
       );
     }
-  }, [safeTxHashInput, selectedAsset, showStatus, targetAddress]);
+  }, [gasPayerAddress, safeTxHashInput, selectedAsset, showStatus, targetAddress]);
 
   const copyMaximumRecoveryDossier = useCallback(async () => {
     const dossier = {
@@ -3982,24 +4341,7 @@ export default function App() {
   }, []);
 
   const canSendSelected = Boolean(
-    selectedAsset &&
-      (externalMatches ||
-        selectedAssetCounterfactualSafeReady ||
-        (selectedAsset.chainId === WORLD_CHAIN_ID
-          ? authenticated &&
-            miniKitReady &&
-            authenticatedWorldAddress &&
-            (() => {
-              try {
-                return (
-                  normalizeAddress(authenticatedWorldAddress) ===
-                  normalizeAddress(targetAddress)
-                );
-              } catch {
-                return false;
-              }
-            })()
-          : false)),
+    selectedAsset && externalExecutionRoute.canExecute,
   );
 
   const canSubmitRecovery = Boolean(
@@ -4008,6 +4350,220 @@ export default function App() {
       feeBreakdown &&
       isValidEvmAddressInput(recipient),
   );
+
+  const applyManualSafeMirrorDeployment = useCallback(async () => {
+    if (!selectedAsset) {
+      showStatus("Selecciona primero el token que quieres mover.", "warning");
+      return;
+    }
+
+    const mirror = selectedAsset.accountState?.counterfactualSafe;
+    if (!mirror?.detected) {
+      showStatus(
+        "Primero RC Wallet debe detectar que esta direccion es Safe en World Chain.",
+        "warning",
+      );
+      return;
+    }
+
+    setManualSafeBusy(true);
+    setManualSafeStatus(null);
+
+    try {
+      const deployment = await validateManualSafeMirrorDeployment({
+        network: selectedAsset.network,
+        targetAddress,
+        manualDeployment: {
+          method: manualSafeMethod,
+          factory: manualSafeFactory,
+          singleton: manualSafeSingleton,
+          initializer: manualSafeInitializer,
+          saltNonce: manualSafeSaltNonce,
+          callback: manualSafeCallback,
+        },
+      });
+
+      const updatedAccountState = {
+        ...(selectedAsset.accountState ?? {}),
+        counterfactualSafe: {
+          ...mirror,
+          detected: true,
+          deploymentRequired: true,
+          deployment,
+          deploymentError: null,
+          requirement:
+            "Datos manuales validados: desplegar la misma Safe y ejecutar desde owner",
+        },
+      };
+
+      if (
+        connectedExternalAddress &&
+        !safeMirrorOwnersInclude(updatedAccountState, connectedExternalAddress)
+      ) {
+        throw new Error(
+          "La wallet conectada no aparece como owner de la Safe original.",
+        );
+      }
+
+      if (!deployment.ready) {
+        setManualSafeStatus({
+          type: "warning",
+          message:
+            "Los datos recrean la Safe original, pero no estan listos para desplegar en esta red. Revisa factory/singleton desplegados y metodo usado.",
+        });
+        showStatus(
+          "Ruta Safe manual verificada parcialmente. Aun no esta lista para desplegar.",
+          "warning",
+        );
+        return;
+      }
+
+      setAssets((current) =>
+        current.map((asset) =>
+          asset.chainId === selectedAsset.chainId
+            ? { ...asset, accountState: updatedAccountState }
+            : asset,
+        ),
+      );
+      setNetworkStates((current) => ({
+        ...current,
+        [selectedAsset.chainId]: {
+          ...(current[selectedAsset.chainId] ?? {}),
+          accountKind: updatedAccountState.kind ?? "no-contract",
+          accountState: updatedAccountState,
+        },
+      }));
+      setManualSafeStatus({
+        type: "success",
+        message:
+          "Ruta Safe manual lista: la prediccion coincide y puede usarse para desplegar y mover.",
+      });
+      showStatus(
+        "Ruta Safe manual lista. Completa destino y monto para desplegar la Safe y mover los fondos.",
+        "success",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "No se pudo validar la ruta Safe manual";
+      setManualSafeStatus({ type: "error", message });
+      showStatus(message, "error");
+    } finally {
+      if (mountedRef.current) setManualSafeBusy(false);
+    }
+  }, [
+    connectedExternalAddress,
+    manualSafeCallback,
+    manualSafeFactory,
+    manualSafeInitializer,
+    manualSafeMethod,
+    manualSafeSaltNonce,
+    manualSafeSingleton,
+    selectedAsset,
+    showStatus,
+    targetAddress,
+  ]);
+
+  const runSafeForgeSearch = useCallback(async () => {
+    if (!selectedAsset) {
+      showStatus("Selecciona primero el token que quieres mover.", "warning");
+      return;
+    }
+
+    const mirror = selectedAsset.accountState?.counterfactualSafe;
+    if (!mirror?.detected) {
+      showStatus(
+        "Primero RC Wallet debe detectar que esta direccion es Safe en World Chain.",
+        "warning",
+      );
+      return;
+    }
+
+    setSafeForgeBusy(true);
+    setSafeForgeStatus(null);
+
+    try {
+      const extraFallbackHandlers = safeForgeExtraHandlers
+        .split(/[\s,;]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const result = await forgeSafeMirrorDeployment({
+        network: selectedAsset.network,
+        targetAddress,
+        saltNonceStart: safeForgeStart,
+        saltNonceEnd: safeForgeEnd,
+        setupTo: safeForgeSetupTo || undefined,
+        setupData: safeForgeSetupData || "0x",
+        extraFallbackHandlers,
+      });
+      const deployment =
+        result?.targetPrediction || result?.ready ? result : result?.deployment;
+
+      if (!deployment) {
+        const message = `Safe Forge no encontro coincidencia en ${result.attempts} intento(s). Amplia el rango o agrega setup/fallback handler si World App uso una plantilla distinta.`;
+        setSafeForgeStatus({ type: "warning", message });
+        showStatus(message, "warning");
+        return;
+      }
+
+      const updatedAccountState = {
+        ...(selectedAsset.accountState ?? {}),
+        counterfactualSafe: {
+          ...mirror,
+          detected: true,
+          deploymentRequired: true,
+          deployment,
+          deploymentError: null,
+          requirement:
+            "Safe Forge encontro una creacion que predice exactamente la direccion con fondos",
+        },
+      };
+
+      setAssets((current) =>
+        current.map((asset) =>
+          asset.chainId === selectedAsset.chainId
+            ? { ...asset, accountState: updatedAccountState }
+            : asset,
+        ),
+      );
+      setNetworkStates((current) => ({
+        ...current,
+        [selectedAsset.chainId]: {
+          ...(current[selectedAsset.chainId] ?? {}),
+          accountKind: updatedAccountState.kind ?? "no-contract",
+          accountState: updatedAccountState,
+        },
+      }));
+
+      const message = deployment.ready
+        ? `Safe Forge encontro ruta lista con salt ${deployment.saltNonce}. Ya puedes desplegar Safe y mover si conectas el owner.`
+        : `Safe Forge encontro coincidencia con salt ${deployment.saltNonce}, pero falta factory/singleton en la red destino.`;
+      setSafeForgeStatus({
+        type: deployment.ready ? "success" : "warning",
+        message,
+      });
+      showStatus(message, deployment.ready ? "success" : "warning");
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Safe Forge no pudo completar la busqueda";
+      setSafeForgeStatus({ type: "error", message });
+      showStatus(message, "error");
+    } finally {
+      if (mountedRef.current) setSafeForgeBusy(false);
+    }
+  }, [
+    safeForgeEnd,
+    safeForgeExtraHandlers,
+    safeForgeSetupData,
+    safeForgeSetupTo,
+    safeForgeStart,
+    selectedAsset,
+    showStatus,
+    targetAddress,
+  ]);
 
   const openCounterfactualSafeDeployFlow = useCallback(() => {
     openSendForm();
@@ -4326,13 +4882,11 @@ export default function App() {
                 )}
                 <div>
                   <dt>Firma requerida</dt>
-                  <dd>
-                    {externalMatches
-                      ? "Wallet externa / llave privada local"
-                      : selectedAsset.chainId === WORLD_CHAIN_ID
-                        ? "MiniKit / World App"
-                        : "Wallet externa firmante exacta"}
-                  </dd>
+                  <dd>{externalExecutionRoute.signerLabel}</dd>
+                </div>
+                <div>
+                  <dt>Ruta</dt>
+                  <dd>{externalExecutionRoute.label}</dd>
                 </div>
                 <div>
                   <dt>Fee de red</dt>
@@ -4356,10 +4910,7 @@ export default function App() {
                   type="button"
                   disabled={sending}
                   onClick={async () => {
-                    if (
-                      selectedAsset.chainId === WORLD_CHAIN_ID &&
-                      !externalMatches
-                    ) {
+                    if (externalExecutionRoute.id === "world-minikit") {
                       const confirmed = await confirmWorldAction(
                         "envío de activos",
                       );
@@ -5293,6 +5844,32 @@ export default function App() {
               />
             </div>
 
+            {selectedAsset && (
+              <div
+                className={`execution-route execution-route--${externalExecutionRoute.level}`}
+              >
+                <div>
+                  <span className="eyebrow">Ruta de ejecucion externa</span>
+                  <strong>{externalExecutionRoute.label}</strong>
+                  <p>{externalExecutionRoute.reason}</p>
+                </div>
+                <dl>
+                  <div>
+                    <dt>Accion</dt>
+                    <dd>{externalExecutionRoute.actionLabel}</dd>
+                  </div>
+                  <div>
+                    <dt>Firma</dt>
+                    <dd>{externalExecutionRoute.signerLabel}</dd>
+                  </div>
+                  <div>
+                    <dt>Gas</dt>
+                    <dd>{externalExecutionRoute.gasLabel}</dd>
+                  </div>
+                </dl>
+              </div>
+            )}
+
             {selectedRecoveryDiagnosis && (
               <div
                 className={`rescue-diagnosis rescue-diagnosis--${selectedRecoveryDiagnosis.level}`}
@@ -5358,6 +5935,207 @@ export default function App() {
                 safeTxHashInput={safeTxHashInput}
                 onSafeTxHashChange={setSafeTxHashInput}
               />
+            )}
+
+            {selectedAsset?.accountState?.counterfactualSafe?.detected && (
+              <div className="manual-safe-lab safe-forge-lab">
+                <div>
+                  <span className="eyebrow">Ruta experimental segura</span>
+                  <strong>Safe Forge auto</strong>
+                  <p>
+                    RC Wallet lee la Safe viva en World Chain, reconstruye
+                    initializers comunes con owners reales y busca un salt nonce
+                    que produzca exactamente{" "}
+                    <code>{compactAddress(targetAddress)}</code>. No envia
+                    transacciones durante la busqueda.
+                  </p>
+                </div>
+                <div className="manual-safe-grid">
+                  <label className="label">
+                    Salt inicio
+                    <input
+                      className="input"
+                      value={safeForgeStart}
+                      onChange={(event) => setSafeForgeStart(event.target.value)}
+                      placeholder="0"
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label">
+                    Salt fin
+                    <input
+                      className="input"
+                      value={safeForgeEnd}
+                      onChange={(event) => setSafeForgeEnd(event.target.value)}
+                      placeholder="5000"
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label">
+                    Setup to
+                    <input
+                      className="input"
+                      value={safeForgeSetupTo}
+                      onChange={(event) =>
+                        setSafeForgeSetupTo(event.target.value)
+                      }
+                      placeholder="Opcional"
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label">
+                    Setup data
+                    <input
+                      className="input"
+                      value={safeForgeSetupData}
+                      onChange={(event) =>
+                        setSafeForgeSetupData(event.target.value)
+                      }
+                      placeholder="0x"
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label manual-safe-grid__wide">
+                    Fallback handlers extra
+                    <input
+                      className="input"
+                      value={safeForgeExtraHandlers}
+                      onChange={(event) =>
+                        setSafeForgeExtraHandlers(event.target.value)
+                      }
+                      placeholder="0x... separados por coma o espacio"
+                      spellCheck="false"
+                    />
+                  </label>
+                </div>
+                <button
+                  className="button button--deploy-safe"
+                  type="button"
+                  disabled={safeForgeBusy}
+                  onClick={runSafeForgeSearch}
+                >
+                  {safeForgeBusy
+                    ? "Buscando despliegue..."
+                    : "Buscar despliegue Safe"}
+                </button>
+                {safeForgeStatus && (
+                  <p className={`manual-safe-status manual-safe-status--${safeForgeStatus.type}`}>
+                    {safeForgeStatus.message}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {selectedAsset?.accountState?.counterfactualSafe?.detected && (
+              <div className="manual-safe-lab">
+                <div>
+                  <span className="eyebrow">Ruta avanzada</span>
+                  <strong>Safe manual deploy</strong>
+                  <p>
+                    Si la busqueda automatica no encontro la creacion Safe,
+                    pega los datos originales. RC Wallet solo activa el
+                    despliegue si la prediccion coincide exactamente con{" "}
+                    <code>{compactAddress(targetAddress)}</code>.
+                  </p>
+                </div>
+                <div className="manual-safe-grid">
+                  <label className="label">
+                    Metodo
+                    <select
+                      className="input"
+                      value={manualSafeMethod}
+                      onChange={(event) =>
+                        setManualSafeMethod(event.target.value)
+                      }
+                    >
+                      <option value="createProxyWithNonce">
+                        createProxyWithNonce
+                      </option>
+                      <option value="createProxyWithNonceL2">
+                        createProxyWithNonceL2
+                      </option>
+                      <option value="createProxyWithCallback">
+                        createProxyWithCallback
+                      </option>
+                    </select>
+                  </label>
+                  <label className="label">
+                    Factory
+                    <input
+                      className="input"
+                      value={manualSafeFactory}
+                      onChange={(event) =>
+                        setManualSafeFactory(event.target.value)
+                      }
+                      placeholder="0x..."
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label">
+                    Singleton
+                    <input
+                      className="input"
+                      value={manualSafeSingleton}
+                      onChange={(event) =>
+                        setManualSafeSingleton(event.target.value)
+                      }
+                      placeholder="0x..."
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label manual-safe-grid__wide">
+                    Initializer
+                    <textarea
+                      className="input manual-safe-textarea"
+                      value={manualSafeInitializer}
+                      onChange={(event) =>
+                        setManualSafeInitializer(event.target.value)
+                      }
+                      placeholder="0x..."
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label">
+                    Salt nonce
+                    <input
+                      className="input"
+                      value={manualSafeSaltNonce}
+                      onChange={(event) =>
+                        setManualSafeSaltNonce(event.target.value)
+                      }
+                      placeholder="0"
+                      spellCheck="false"
+                    />
+                  </label>
+                  <label className="label">
+                    Callback
+                    <input
+                      className="input"
+                      value={manualSafeCallback}
+                      onChange={(event) =>
+                        setManualSafeCallback(event.target.value)
+                      }
+                      placeholder="Solo si aplica"
+                      spellCheck="false"
+                    />
+                  </label>
+                </div>
+                <button
+                  className="button button--deploy-safe"
+                  type="button"
+                  disabled={manualSafeBusy}
+                  onClick={applyManualSafeMirrorDeployment}
+                >
+                  {manualSafeBusy
+                    ? "Validando Safe..."
+                    : "Validar ruta Safe manual"}
+                </button>
+                {manualSafeStatus && (
+                  <p className={`manual-safe-status manual-safe-status--${manualSafeStatus.type}`}>
+                    {manualSafeStatus.message}
+                  </p>
+                )}
+              </div>
             )}
 
             {selectedAsset && (
@@ -5455,6 +6233,48 @@ export default function App() {
                     {externalConnectionName}: {connectedExternalAddress}
                   </p>
                 )}
+                <div className="gas-payer-box">
+                  <strong>Pagador de gas externo</strong>
+                  <p>
+                    Para Safe, la llave World App puede firmar como owner y una
+                    wallet distinta puede pagar gas para desplegar o ejecutar en
+                    esta red.
+                  </p>
+                  <div className="wallet-connectors">
+                    <button
+                      className="button button--secondary"
+                      type="button"
+                      disabled={gasPayerConnecting}
+                      onClick={() => connectGasPayerWallet("injected")}
+                    >
+                      Conectar pagador del navegador
+                    </button>
+                    {walletConnectConfigured && (
+                      <button
+                        className="button button--secondary"
+                        type="button"
+                        disabled={gasPayerConnecting}
+                        onClick={() => connectGasPayerWallet("walletconnect")}
+                      >
+                        Pagador por WalletConnect
+                      </button>
+                    )}
+                    {gasPayerAddress && (
+                      <button
+                        className="button button--danger"
+                        type="button"
+                        onClick={disconnectGasPayerWallet}
+                      >
+                        Quitar pagador
+                      </button>
+                    )}
+                  </div>
+                  {gasPayerAddress && (
+                    <p className="match">
+                      {gasPayerName || "Pagador"}: {gasPayerAddress}
+                    </p>
+                  )}
+                </div>
                 {selectedAsset.accountState?.hasCode && (
                   <p className="warning-copy">
                     La dirección tiene bytecode en esta red. Es una cuenta de
@@ -5605,18 +6425,10 @@ export default function App() {
               {sending
                 ? "Esperando confirmación…"
                 : canSubmitRecovery
-                  ? selectedAssetUsesCounterfactualSafeOwnerSigner
-                    ? selectedAssetCounterfactualSafeReady
-                      ? `Desplegar Safe y enviar ${selectedAsset.symbol}`
-                      : "Validar Safe antes de enviar"
-                    : `Enviar ${selectedAsset.symbol}`
+                  ? externalExecutionRoute.actionLabel
                   : canSendSelected
                     ? "Completa destino y monto para continuar"
-                    : selectedAssetUsesCounterfactualSafeOwnerSigner
-                      ? "Validar Safe antes de enviar"
-                    : selectedAsset.chainId === WORLD_CHAIN_ID
-                      ? "Conecta MetaMask, llave local o World App"
-                      : "Conecta wallet firmante exacta"}
+                    : externalExecutionRoute.actionLabel}
             </button>
 
             <p className="fine-print">
