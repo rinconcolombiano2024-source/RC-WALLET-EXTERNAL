@@ -73,11 +73,10 @@ const WORLD_MINI_APP_URL =
 const WORLD_ID_STATEMENT = "Iniciar sesión en RC Wallet Recovery";
 
 const APP_TABS = Object.freeze([
-  { id: "home", label: "Inicio", icon: "⌂" },
-  { id: "tokens", label: "Tokens", icon: "◈" },
-  { id: "recovery", label: "Mover", icon: "⛑" },
-  { id: "markets", label: "Markets", icon: "↗" },
-  { id: "tools", label: "Herramientas", icon: "⚙" },
+  { id: "home", label: "Inicio", icon: "01" },
+  { id: "tools", label: "Direccion", icon: "02" },
+  { id: "tokens", label: "Escanear", icon: "03" },
+  { id: "recovery", label: "Mover", icon: "04" },
 ]);
 
 const TOKEN_REFERENCE_LINKS = Object.freeze({
@@ -1081,7 +1080,7 @@ function createRecoveryDiagnosis({
       ? "RC Wallet detectó estructura Safe. Para mover fondos se necesitan owners, threshold y ejecución Safe real. Si no están disponibles, la app documenta la ruta pero no puede firmar por ti."
       : accountIsContract
       ? "Genera la prueba RC Link y revisa EIP-1271 / ERC-4337 / Safe. Si no existe un módulo, owner o bundler autorizado en esa red, la app solo puede documentar el caso."
-      : "Importa la llave privada local o conecta MetaMask, Trust Wallet, Binance Wallet o WalletConnect con la dirección exacta y con capacidad de firmar.",
+      : "Importa la llave privada local o conecta un firmante externo con la direccion exacta y con capacidad de firmar.",
     requirements: accountIsContract
       ? [
           safeDetected ? "Firmas de owners Safe" : "Autoridad de smart account",
@@ -1200,6 +1199,145 @@ function getSafeRescueState({ asset, targetAddress, connectedExternalAddress }) 
     action:
       "Importa la llave exacta o conecta una wallet que pueda firmar desde la direccion con fondos.",
   };
+}
+
+function rescueStepClass(status) {
+  if (status === "ready") return "rescue-step rescue-step--ready";
+  if (status === "blocked") return "rescue-step rescue-step--blocked";
+  return "rescue-step";
+}
+
+function RescueMissionPanel({
+  targetAddress,
+  connectedExternalAddress,
+  externalConnectionName,
+  externalMatches,
+  assets,
+  scanning,
+  selectedAsset,
+  movementState,
+  onOpenAddress,
+  onScan,
+  onOpenTokens,
+  onOpenMove,
+  onDisconnect,
+}) {
+  const hasTarget = Boolean(targetAddress);
+  const hasAssets = assets.length > 0;
+  const signerReady = Boolean(connectedExternalAddress && externalMatches);
+  const signerBlocked = Boolean(connectedExternalAddress && !externalMatches);
+  const selectedReady = Boolean(selectedAsset && movementState?.level === "ready");
+  const signerLabel = connectedExternalAddress
+    ? `${externalConnectionName || "Firmante"}: ${compactAddress(connectedExternalAddress)}`
+    : "Falta importar llave World App u owner Safe";
+
+  const steps = [
+    {
+      id: "address",
+      number: "01",
+      title: "Direccion Worldcoin con fondos",
+      status: hasTarget ? "ready" : "pending",
+      detail: hasTarget
+        ? compactAddress(targetAddress)
+        : "Pega la direccion donde estan los fondos.",
+      action: "Abrir",
+      onClick: onOpenAddress,
+    },
+    {
+      id: "scan",
+      number: "02",
+      title: "Escaneo EVM real",
+      status: hasAssets ? "ready" : scanning ? "pending" : "pending",
+      detail: scanning
+        ? "Leyendo Ethereum, Base, Optimism, BNB y World Chain."
+        : hasAssets
+          ? `${assets.length} activo(s) detectado(s).`
+          : "Escanea redes para encontrar tokens y tipo de cuenta.",
+      action: scanning ? "Escaneando" : hasTarget ? "Escanear" : "Pendiente",
+      onClick: hasTarget ? onScan : onOpenAddress,
+      disabled: scanning,
+    },
+    {
+      id: "signer",
+      number: "03",
+      title: "Firmante World App / Safe",
+      status: signerReady ? "ready" : signerBlocked ? "blocked" : "pending",
+      detail: signerReady
+        ? signerLabel
+        : signerBlocked
+          ? "El firmante no coincide; solo sirve si es owner Safe valido."
+          : signerLabel,
+      action: connectedExternalAddress ? "Borrar" : "Importar",
+      onClick: connectedExternalAddress ? onDisconnect : onOpenAddress,
+    },
+    {
+      id: "move",
+      number: "04",
+      title: "Mover fondos",
+      status: selectedReady ? "ready" : selectedAsset ? "pending" : "pending",
+      detail: selectedReady
+        ? `${selectedAsset.symbol} listo por ruta ${movementState.detail}.`
+        : selectedAsset
+          ? `${selectedAsset.symbol}: ${movementState?.label ?? "validar ruta"}.`
+          : "Selecciona un token detectado.",
+      action: selectedAsset ? "Mover" : "Tokens",
+      onClick: selectedAsset ? onOpenMove : onOpenTokens,
+    },
+  ];
+
+  return (
+    <section className="rescue-mission">
+      <div className="rescue-mission__head">
+        <div>
+          <span className="eyebrow">RC Wallet External Rescue</span>
+          <h2>Rescate Worldcoin en redes externas</h2>
+          <p>
+            RC Wallet detecto fondos en esta direccion. Para moverlos necesita
+            una de estas pruebas: llave exacta, owner Safe valido o despliegue
+            Safe compatible en esta red.
+          </p>
+        </div>
+        <span className={signerReady ? "badge badge--green" : "badge badge--amber"}>
+          {signerReady ? "Firma valida" : "Firma pendiente"}
+        </span>
+      </div>
+
+      <dl className="rescue-authority">
+        <div>
+          <dt>Direccion con fondos</dt>
+          <dd>{hasTarget ? compactAddress(targetAddress) : "Pendiente"}</dd>
+        </div>
+        <div>
+          <dt>Firmante real</dt>
+          <dd>{connectedExternalAddress ? compactAddress(connectedExternalAddress) : "Pendiente"}</dd>
+        </div>
+        <div>
+          <dt>Regla</dt>
+          <dd>{signerReady ? "Autorizado" : "Validar antes de enviar"}</dd>
+        </div>
+      </dl>
+
+      <div className="rescue-steps">
+        {steps.map((step) => (
+          <article className={rescueStepClass(step.status)} key={step.id}>
+            <span>{step.number}</span>
+            <div>
+              <strong>{step.title}</strong>
+              <p>{step.detail}</p>
+            </div>
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={step.onClick}
+              disabled={step.disabled}
+            >
+              {step.action}
+            </button>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function buildSafeRescueSnapshot({
@@ -1652,7 +1790,7 @@ export default function App() {
   const [status, setStatus] = useState({
     type: "info",
     message:
-      "Abre una direccion con llave privada local, conecta una wallet externa o analiza una direccion EVM.",
+      "Pega la direccion Worldcoin con fondos, importa el firmante y RC Wallet mostrara la ruta real para mover.",
   });
 
   const selectedAsset = useMemo(
@@ -1874,7 +2012,10 @@ export default function App() {
   const homeAssets = useMemo(() => assets.slice(0, 5), [assets]);
 
   const viewClass = useCallback(
-    (tabId) => `app-view ${activeTab === tabId ? "app-view--active" : ""}`,
+    (tabId) =>
+      `app-view app-view--${tabId} ${
+        activeTab === tabId ? "app-view--active" : ""
+      }`,
     [activeTab],
   );
 
@@ -3969,56 +4110,15 @@ export default function App() {
               </div>
             </div>
 
-            {marketLoading && !market && (
-              <p className="empty">Cargando gráfica del mercado…</p>
-            )}
-
-            {market ? (
-              <>
-                <div className="market-stats">
-                  <div>
-                    <span>Precio</span>
-                    <strong>
-                      {market.priceUsd
-                        ? formatUsd(market.priceUsd, 8)
-                        : "—"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>Volumen 24h</span>
-                    <strong>{formatCompactUsd(market.volume24h)}</strong>
-                  </div>
-                  <div>
-                    <span>Liquidez</span>
-                    <strong>{formatCompactUsd(market.liquidityUsd)}</strong>
-                  </div>
-                  <div>
-                    <span>Market cap</span>
-                    <strong>
-                      {formatCompactUsd(market.marketCap || market.fdv)}
-                    </strong>
-                  </div>
-                </div>
-                <div className="chart-frame token-screen__chart">
-                  <iframe
-                    key={`screen-${market.pairAddress}`}
-                    title={`Pantalla ${selectedAsset.symbol}`}
-                    src={market.chartUrl}
-                    loading="lazy"
-                    sandbox="allow-scripts allow-same-origin allow-popups"
-                    allowFullScreen
-                  />
-                </div>
-              </>
-            ) : (
-              <div className="market-unavailable">
-                <strong>Gráfica no disponible todavía</strong>
-                <span>
-                  Si no existe pool o liquidez, primero debe crearse mercado
-                  real para este activo.
-                </span>
-              </div>
-            )}
+            <div className="token-rescue-route">
+              <span className="eyebrow">Ruta de rescate</span>
+              <strong>{selectedAssetMovementState.label}</strong>
+              <p>
+                {selectedAssetMovementState.detail}. RC Wallet solo habilita el
+                movimiento si la firma corresponde a la direccion con fondos o
+                a un owner Safe valido.
+              </p>
+            </div>
 
             <div className="reference-links">
               <strong>Información del activo</strong>
@@ -4066,29 +4166,6 @@ export default function App() {
               </div>
             </div>
 
-            <div className="trade-grid">
-              <button
-                className="trade-button trade-button--buy"
-                type="button"
-                onClick={() => openTrade("buy")}
-              >
-                Comprar
-              </button>
-              <button
-                className="trade-button trade-button--sell"
-                type="button"
-                onClick={() => openTrade("sell")}
-              >
-                Vender
-              </button>
-              <button
-                className="trade-button trade-button--swap"
-                type="button"
-                onClick={() => openTrade("swap")}
-              >
-                Cambiar
-              </button>
-            </div>
             <button
               className="trade-button trade-button--send"
               type="button"
@@ -4262,12 +4339,12 @@ export default function App() {
 
         <section className={viewClass("home")}>
           <section className="home-wallet-card">
-            <span className="eyebrow">Wallet activa</span>
-            <h2>{targetAddress ? compactAddress(targetAddress) : "Abrir wallet externa"}</h2>
+            <span className="eyebrow">Rescate principal</span>
+            <h2>{targetAddress ? compactAddress(targetAddress) : "RC Wallet External"}</h2>
             <p>
               {targetAddress
-                ? "Prioridad: mover fondos de tu direccion Worldcoin en redes externas distintas a World Chain."
-                : "Importa la direccion Worldcoin con la llave privada exportada por World App para revisar fondos externos."}
+                ? "Direccion Worldcoin activa. La app valida llave exacta, owner Safe o despliegue Safe compatible antes de mover."
+                : "Herramienta dedicada a rescatar fondos de direcciones Worldcoin en Ethereum y otras redes EVM."}
             </p>
             <div className="home-login-actions">
               <button
@@ -4277,8 +4354,8 @@ export default function App() {
                 onClick={connectBestExternalWallet}
               >
                 {externalConnecting
-                  ? "Conectando wallet…"
-                  : "Conectar wallet externa"}
+                  ? "Conectando firmante..."
+                  : "Conectar owner externo"}
               </button>
               <button
                 className="button button--secondary"
@@ -4291,11 +4368,11 @@ export default function App() {
               </button>
             </div>
             <div className="local-key-box local-key-box--home">
-              <strong>Importar dirección Worldcoin</strong>
+              <strong>Importar direccion Worldcoin</strong>
               <p>
-                Pega la direccion Worldcoin/World App y la llave privada
-                exportada por World App. RC Wallet abre esa direccion, no una
-                cuenta nueva.
+                Pega la direccion Worldcoin/World App con fondos y la llave
+                exportada por World App. RC Wallet deriva el firmante real y
+                verifica si puede mover directo o como owner Safe.
               </p>
               <input
                 className="input"
@@ -4335,44 +4412,54 @@ export default function App() {
                 Externa: {compactAddress(connectedExternalAddress)}
               </p>
             )}
+            <RescueMissionPanel
+              targetAddress={targetAddress}
+              connectedExternalAddress={connectedExternalAddress}
+              externalConnectionName={externalConnectionName}
+              externalMatches={externalMatches}
+              assets={assets}
+              scanning={scanning}
+              selectedAsset={selectedAsset}
+              movementState={selectedAssetMovementState}
+              onOpenAddress={() => setActiveTab("tools")}
+              onScan={scan}
+              onOpenTokens={() => setActiveTab("tokens")}
+              onOpenMove={openSendForm}
+              onDisconnect={disconnectExternal}
+            />
             <div className="quick-actions">
+              <button
+                className="quick-action"
+                type="button"
+                onClick={() => setActiveTab("tools")}
+              >
+                Direccion
+              </button>
+              <button
+                className="quick-action"
+                type="button"
+                onClick={() => {
+                  setActiveTab("tokens");
+                  if (targetAddress) void scan();
+                }}
+                disabled={!targetAddress || scanning}
+              >
+                Escanear
+              </button>
               <button
                 className="quick-action"
                 type="button"
                 onClick={openSendForm}
                 disabled={!selectedAsset}
               >
-                Enviar
-              </button>
-              <button
-                className="quick-action"
-                type="button"
-                onClick={() => setActiveTab("tools")}
-              >
-                Recibir
-              </button>
-              <button
-                className="quick-action"
-                type="button"
-                onClick={() => openTrade("buy")}
-                disabled={!selectedAsset}
-              >
-                Comprar
-              </button>
-              <button
-                className="quick-action"
-                type="button"
-                onClick={() => openTrade("sell")}
-                disabled={!selectedAsset}
-              >
-                Vender
+                Mover
               </button>
               <button
                 className="quick-action quick-action--primary"
                 type="button"
-                onClick={() => setActiveTab("recovery")}
+                onClick={() => setShowInstallModal(true)}
               >
-                Mover
+                Descargar app
               </button>
             </div>
           </section>
@@ -4442,28 +4529,6 @@ export default function App() {
             )}
           </section>
 
-          <section className="local-card local-card--compact">
-            <div>
-              <span className="eyebrow">Publicidad local</span>
-              <h2>Rincón Colombiano</h2>
-              <p className="local-card__lead">
-                Reclama una empanada gratis mostrando esta pantalla por compras superiores a 50 zł en nuestro local de comida colombiana en Czapelska 33 y disfruta el mejor sabor de la cocina colombiana.
-              </p>
-            </div>
-            <button
-              className="button local-card__button"
-              type="button"
-              onClick={() =>
-                window.open(
-                  "https://maps.app.goo.gl/MKzY4KzWp8NrTBjw5?g_st=ac",
-                  "_blank",
-                  "noopener,noreferrer",
-                )
-              }
-            >
-              Abrir mapa
-            </button>
-          </section>
         </section>
 
         <section className={viewClass("tools")}>
@@ -4519,10 +4584,10 @@ export default function App() {
           </div>
 
           <div className="local-key-box">
-            <strong>Importar dirección Worldcoin</strong>
+            <strong>Importar direccion Worldcoin</strong>
             <p>
-              Esta app esta dedicada a Worldcoin: importa la direccion World
-              App indicada y usa la llave exportada solo para firmar y pagar gas.
+              Esta app esta dedicada a rescate Worldcoin: importa la direccion
+              con fondos y usa la llave exportada solo como firmante local.
             </p>
             <input
               className="input"
@@ -4959,34 +5024,10 @@ export default function App() {
               </>
             )}
 
-            <div className="trade-grid">
-              <button
-                className="trade-button trade-button--buy"
-                type="button"
-                onClick={() => openTrade("buy")}
-              >
-                Comprar
-              </button>
-              <button
-                className="trade-button trade-button--sell"
-                type="button"
-                onClick={() => openTrade("sell")}
-              >
-                Vender
-              </button>
-              <button
-                className="trade-button trade-button--swap"
-                type="button"
-                onClick={() => openTrade("swap")}
-              >
-                Cambiar activo
-              </button>
-            </div>
-
             <p className="market-disclaimer">
-              La operación se abre en el DEX correspondiente. Si no existe
-              liquidez, el DEX mostrará que primero debe crearse un pool.
-              Revisa siempre precio, ruta, impacto y slippage antes de firmar.
+              Mercado solo informativo. La funcion principal de RC Wallet
+              External es mover fondos desde la direccion Worldcoin cuando
+              exista firma exacta u owner Safe valido.
             </p>
 
             <button
@@ -4994,12 +5035,27 @@ export default function App() {
               type="button"
               onClick={openSendForm}
             >
-              Enviar {selectedAsset.symbol}
+              Mover {selectedAsset.symbol}
             </button>
           </section>
           </section>
 
           <section className={viewClass("recovery")}>
+          <RescueMissionPanel
+            targetAddress={targetAddress}
+            connectedExternalAddress={connectedExternalAddress}
+            externalConnectionName={externalConnectionName}
+            externalMatches={externalMatches}
+            assets={assets}
+            scanning={scanning}
+            selectedAsset={selectedAsset}
+            movementState={selectedAssetMovementState}
+            onOpenAddress={() => setActiveTab("tools")}
+            onScan={scan}
+            onOpenTokens={() => setActiveTab("tokens")}
+            onOpenMove={openSendForm}
+            onDisconnect={disconnectExternal}
+          />
           <section className="card diagnostic-card">
             <div className="section-heading">
               <div>
@@ -5200,18 +5256,15 @@ export default function App() {
             {selectedAsset && (
               <div className="recovery-explanation">
                 <strong>
-                  {selectedAsset.chainId === WORLD_CHAIN_ID
-                    ? "World Chain tambien puede firmarse como wallet externa."
-                    : "Esta red no puede firmarse con MiniKit."}
+                  RC Wallet valida autoridad real antes de mover.
                 </strong>
                 <p>
-                  {selectedAsset.chainId === WORLD_CHAIN_ID
-                    ? "Si estas fuera de World App, conecta MetaMask, WalletConnect o una llave privada local que abra exactamente "
-                    : "Conecta un proveedor externo. La transferencia solo se habilita si ese proveedor expone exactamente "}
-                  <code>{compactAddress(targetAddress)}</code>.
+                  Para esta red se necesita llave exacta de{" "}
+                  <code>{compactAddress(targetAddress)}</code>, owner Safe
+                  valido o una Safe espejo desplegable con prediccion exacta.
                 </p>
                 <div className="local-key-box">
-                  <strong>Importar dirección Worldcoin</strong>
+                  <strong>Importar direccion Worldcoin</strong>
                   <p>
                     Pega la direccion Worldcoin que contiene los fondos y la
                     llave exportada por World App. RC Wallet usa esa direccion
@@ -5285,10 +5338,9 @@ export default function App() {
                 </div>
                 {!walletConnectConfigured && (
                   <p className="warning-copy">
-                    Para conectar Trust Wallet, MetaMask móvil, Binance Wallet
-                    o Coinbase Wallet desde World App debes configurar
+                    Para conectar wallets moviles por WalletConnect configura
                     <code> VITE_REOWN_PROJECT_ID</code> en Vercel. Sin eso solo
-                    funcionará una wallet inyectada dentro del navegador.
+                    funcionara una wallet inyectada dentro del navegador.
                   </p>
                 )}
                 {connectedExternalAddress && (
@@ -5522,9 +5574,9 @@ export default function App() {
           </div>
 
           <p className="link-copy">
-            RC Wallet puede mostrar, comprar y vender RC.PL cuando exista un
-            pool con liquidez real. El precio objetivo no se impone desde la
-            app: se logra creando liquidez suficiente en un DEX.
+            Modulo informativo separado del rescate. RC Wallet External no
+            depende de un pool para recuperar fondos; primero valida firma,
+            Safe y gas de la red donde estan los tokens.
           </p>
 
           <div className="rcpl-grid">

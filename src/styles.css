@@ -31,7 +31,7 @@ body {
   overflow-x: hidden;
   overscroll-behavior-y: none;
   background:
-    radial-gradient(circle at 10% 0%, rgba(30, 100, 255, 0.16), transparent 32rem),
+    radial-gradient(circle at 10% 0%, rgba(30, 100, 255, 0.12), transparent 32rem),
     #070a0e;
 }
 
@@ -66,14 +66,14 @@ summary:focus-visible {
   min-height: 100vh;
   min-height: 100dvh;
   padding:
-    max(16px, env(safe-area-inset-top))
+    max(12px, env(safe-area-inset-top))
     max(14px, env(safe-area-inset-right))
     calc(112px + env(safe-area-inset-bottom))
     max(14px, env(safe-area-inset-left));
 }
 
 .shell {
-  width: min(100%, 560px);
+  width: min(100%, 1180px);
   margin: 0 auto;
 }
 
@@ -81,7 +81,12 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   gap: 15px;
-  margin: 10px 0 24px;
+  margin: 4px 0 12px;
+  border: 1px solid rgba(82, 165, 255, 0.16);
+  border-radius: 18px;
+  padding: 12px;
+  background: rgba(9, 14, 20, 0.82);
+  box-shadow: 0 15px 50px rgba(0, 0, 0, 0.16);
 }
 
 .hero__copy {
@@ -91,9 +96,9 @@ summary:focus-visible {
 
 .hero__mark {
   display: grid;
-  width: 52px;
-  height: 52px;
-  flex: 0 0 52px;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
   place-items: center;
   border: 1px solid rgba(82, 165, 255, 0.6);
   border-radius: 16px;
@@ -105,7 +110,7 @@ summary:focus-visible {
 
 .hero h1 {
   margin: 0;
-  font-size: 30px;
+  font-size: 26px;
   letter-spacing: 0;
 }
 
@@ -129,15 +134,15 @@ summary:focus-visible {
 
 .card,
 .status {
-  margin-bottom: 14px;
   border: 1px solid #252c36;
-  border-radius: 19px;
+  border-radius: 14px;
   background: rgba(15, 20, 26, 0.96);
   box-shadow: 0 15px 50px rgba(0, 0, 0, 0.18);
 }
 
 .card {
   padding: 18px;
+  margin-bottom: 0;
 }
 
 .status {
@@ -183,13 +188,72 @@ summary:focus-visible {
 }
 
 .app-view--active {
-  display: block;
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  margin-bottom: 12px;
+  border: 1px solid rgba(82, 165, 255, 0.18);
+  border-radius: 20px;
+  padding: 12px;
+  background:
+    linear-gradient(180deg, rgba(14, 21, 31, 0.92), rgba(8, 11, 16, 0.94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 20px 70px rgba(0, 0, 0, 0.18);
+}
+
+.app-view--active::before {
+  display: flex;
+  align-items: center;
+  grid-column: 1 / -1;
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #9fb3cc;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.app-view--home.app-view--active::before {
+  content: "01 Inicio del rescate";
+}
+
+.app-view--tools.app-view--active::before {
+  content: "02 Direccion y firmante";
+}
+
+.app-view--tokens.app-view--active::before {
+  content: "03 Escaneo multicadena";
+}
+
+.app-view--recovery.app-view--active::before {
+  content: "04 Movimiento autorizado";
+}
+
+.app-view--markets.app-view--active::before {
+  content: "Modulo informativo";
+}
+
+.app-view--active > section {
+  min-width: 0;
+}
+
+.app-view--active .card,
+.app-view--active .home-wallet-card {
+  min-width: 0;
+}
+
+.app-view--active .card,
+.app-view--active .home-wallet-card,
+.app-view--active .exchange-dashboard {
+  margin-bottom: 0;
 }
 
 .home-wallet-card {
-  margin-bottom: 14px;
   border: 1px solid rgba(82, 165, 255, 0.48);
-  border-radius: 24px;
+  border-radius: 16px;
   padding: 18px;
   background:
     radial-gradient(circle at 100% 0%, rgba(40, 117, 255, 0.22), transparent 13rem),
@@ -213,7 +277,7 @@ summary:focus-visible {
 
 .quick-actions {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 7px;
   margin-top: 15px;
 }
@@ -239,6 +303,131 @@ summary:focus-visible {
 .quick-action:disabled {
   cursor: not-allowed;
   opacity: 0.38;
+}
+
+.rescue-mission {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  border: 1px solid rgba(82, 165, 255, 0.34);
+  border-radius: 16px;
+  padding: 13px;
+  background: rgba(7, 12, 19, 0.56);
+}
+
+.rescue-mission__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rescue-mission__head h2 {
+  margin: 4px 0 5px;
+  color: #fff;
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.rescue-mission__head p {
+  max-width: 42rem;
+  margin: 0;
+  color: #aeb9c8;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.rescue-authority {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.rescue-authority div {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 9px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.rescue-authority dt {
+  margin-bottom: 4px;
+  color: #8da2bc;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rescue-authority dd {
+  margin: 0;
+  color: #fff;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.rescue-steps {
+  display: grid;
+  gap: 8px;
+}
+
+.rescue-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(92px, auto);
+  align-items: center;
+  gap: 10px;
+  min-height: 64px;
+  border: 1px solid #303b49;
+  border-radius: 12px;
+  padding: 10px;
+  background: #0a1017;
+}
+
+.rescue-step--ready {
+  border-color: #218961;
+  background: #0a1e18;
+}
+
+.rescue-step--blocked {
+  border-color: #743746;
+  background: #211118;
+}
+
+.rescue-step > span {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 999px;
+  background: #172231;
+  color: #a9d1ff;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.rescue-step--ready > span {
+  background: #113225;
+  color: #7df0bd;
+}
+
+.rescue-step--blocked > span {
+  background: #351620;
+  color: #ff9cab;
+}
+
+.rescue-step strong {
+  display: block;
+  color: #fff;
+  font-size: 13px;
+}
+
+.rescue-step p {
+  margin: 3px 0 0;
+  color: #9eabba;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .mini-asset-list {
@@ -369,6 +558,27 @@ summary:focus-visible {
 
 .token-screen__chart {
   min-height: 420px;
+}
+
+.token-rescue-route {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #2e6a56;
+  border-radius: 14px;
+  padding: 13px;
+  background: #0f241d;
+}
+
+.token-rescue-route strong {
+  color: #79e3bc;
+  font-size: 18px;
+}
+
+.token-rescue-route p {
+  margin: 0;
+  color: #bdf3dd;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .modal-backdrop {
@@ -2217,7 +2427,7 @@ summary:focus-visible {
   bottom: max(12px, env(safe-area-inset-bottom));
   left: max(12px, env(safe-area-inset-left));
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   width: min(calc(100% - 24px), 560px);
   margin: 0 auto;
@@ -2336,6 +2546,19 @@ footer {
     grid-template-columns: 1fr;
   }
 
+  .rescue-mission__head,
+  .rescue-step {
+    grid-template-columns: 1fr;
+  }
+
+  .rescue-mission__head {
+    display: grid;
+  }
+
+  .rescue-authority {
+    grid-template-columns: 1fr;
+  }
+
   .exchange-dashboard,
   .bridge-grid,
   .bridge-provider-grid,
@@ -2388,7 +2611,7 @@ footer {
   }
 
   .quick-actions {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .input-row,
@@ -2443,15 +2666,100 @@ footer {
 
 @media (min-width: 900px) {
   .page {
-    padding-bottom: calc(124px + env(safe-area-inset-bottom));
+    padding-bottom: calc(96px + env(safe-area-inset-bottom));
   }
 
   .shell {
-    width: min(100%, 640px);
+    width: min(100%, 1180px);
+  }
+
+  .hero {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .app-view--active {
+    max-height: calc(100dvh - 156px);
+    overflow: auto;
+    scrollbar-color: #32445a transparent;
+    scrollbar-width: thin;
+  }
+
+  .app-view--home.app-view--active {
+    grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+    align-items: stretch;
+  }
+
+  .app-view--home .home-wallet-card {
+    grid-row: span 2;
+  }
+
+  .app-view--home .exchange-dashboard {
+    align-self: stretch;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .app-view--home .token-summary-card {
+    min-height: 0;
+    max-height: 360px;
+    overflow: auto;
+  }
+
+  .app-view--tokens.app-view--active {
+    grid-template-columns: minmax(320px, 0.82fr) minmax(0, 1.18fr);
+    align-items: start;
+  }
+
+  .app-view--tokens .asset-list {
+    max-height: calc(100dvh - 360px);
+    min-height: 220px;
+    overflow: auto;
+    padding-right: 4px;
+  }
+
+  .app-view--recovery.app-view--active {
+    grid-template-columns: minmax(340px, 0.92fr) minmax(0, 1.08fr);
+    align-items: start;
+  }
+
+  .app-view--recovery .rescue-mission {
+    grid-column: 1 / -1;
+  }
+
+  .app-view--recovery .diagnostic-card,
+  .app-view--recovery .card--recovery,
+  .app-view--recovery .bridge-card {
+    max-height: calc(100dvh - 310px);
+    overflow: auto;
+    padding-right: 16px;
+  }
+
+  .app-view--tools.app-view--active {
+    grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
+    align-items: start;
+  }
+
+  .app-view--tools .address-box,
+  .app-view--tools .receive-qr {
+    max-height: 360px;
+    overflow: auto;
+  }
+
+  .token-screen {
+    max-height: calc(100dvh - 110px);
+    overflow: auto;
+  }
+
+  .quick-action,
+  .button,
+  .trade-button,
+  .asset__move {
+    min-height: 44px;
   }
 
   .bottom-nav {
-    width: min(calc(100% - 24px), 640px);
+    top: auto;
+    width: min(calc(100% - 24px), 720px);
   }
 }
 
