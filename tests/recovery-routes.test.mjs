@@ -6,6 +6,10 @@ const blockchainSource = readFileSync(
   "utf8",
 );
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+const stylesSource = readFileSync(
+  new URL("../src/styles.css", import.meta.url),
+  "utf8",
+);
 const safeProposeSource = readFileSync(
   new URL("../api/safe-propose.js", import.meta.url),
   "utf8",
@@ -157,8 +161,19 @@ assert.equal(
 
 assert.equal(appSource.includes("Solo detecci"), false);
 assert.equal(appSource.includes("solo detecci"), false);
+assert.equal(appSource.includes("Publicidad local"), false);
+assert.equal(appSource.includes("Comprar"), false);
+assert.equal(appSource.includes("Vender"), false);
+assert.equal(appSource.includes("solo lectura"), false);
 
 for (const required of [
+  "app-view--${tabId}",
+  "RescueMissionPanel",
+  "Rescate Worldcoin en redes externas",
+  "Direccion Worldcoin con fondos",
+  "Firmante World App / Safe",
+  "RC Wallet detecto fondos en esta direccion",
+  "Descargar app",
   "Tokens disponibles para mover",
   "Mover ahora",
   "Mover con Safe",
@@ -201,6 +216,18 @@ for (const required of [
   "asset__move",
 ]) {
   assert.ok(appSource.includes(required), `Token movement UI is missing: ${required}`);
+}
+
+for (const required of [
+  ".app-view--active::before",
+  ".app-view--home.app-view--active",
+  ".app-view--tokens.app-view--active",
+  ".app-view--recovery.app-view--active",
+  ".app-view--tools.app-view--active",
+  "max-height: calc(100dvh",
+  "overflow: auto",
+]) {
+  assert.ok(stylesSource.includes(required), `Professional app-window layout is missing: ${required}`);
 }
 
 console.log("recovery-routes ok");
