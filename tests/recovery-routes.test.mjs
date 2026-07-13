@@ -22,6 +22,14 @@ const safeTransactionSource = readFileSync(
   new URL("../api/safe-transaction.js", import.meta.url),
   "utf8",
 );
+const safeRelaySource = readFileSync(
+  new URL("../api/safe-relay.js", import.meta.url),
+  "utf8",
+);
+const envExampleSource = readFileSync(
+  new URL("../.env.example", import.meta.url),
+  "utf8",
+);
 const vercelConfig = JSON.parse(
   readFileSync(new URL("../vercel.json", import.meta.url), "utf8"),
 );
@@ -100,10 +108,12 @@ for (const required of [
   "confirmSafeTransactionWithPrivateKeyWallet",
   "executeSafeTransactionFromServiceWithPrivateKeyWallet",
   "executeSafeTransactionFromServiceWithExternalWallet",
+  "relaySafeTransactionFromService",
   "inspectSafeTransactionStatus",
   "buildSafeExecutionSignatures",
   "safe-service-execute-private-key",
   "safe-service-execute-external-gas-payer",
+  "safe-service-gelato-relay",
   "payerLabel: \"pagador de gas\"",
   "execTransaction(...execArgs",
   "postSafeTransactionProposal",
@@ -170,6 +180,28 @@ for (const required of [
     `Safe transaction lookup API is missing: ${required}`,
   );
 }
+
+for (const required of [
+  "GELATO_RELAY_API_KEY",
+  "GELATO_SPONSORED_CALL_URL",
+  "safe-service-gelato-relay",
+  "execTransaction",
+  "buildSafeExecutionSignatures",
+  "confirmationsRequired",
+  "Safe Tx sin firmas suficientes",
+  "Gelato Relay rechazo la ejecucion patrocinada",
+  "relay.gelato.digital/relays/v2/sponsored-call",
+]) {
+  assert.ok(
+    safeRelaySource.includes(required),
+    `Safe relay API is missing: ${required}`,
+  );
+}
+
+assert.ok(
+  envExampleSource.includes("GELATO_RELAY_API_KEY="),
+  "env.example must document GELATO_RELAY_API_KEY",
+);
 
 assert.equal(
   vercelConfig.rewrites.some((rewrite) => rewrite.source.includes("?!api/")),
@@ -242,9 +274,12 @@ for (const required of [
   "safeTxHashInput",
   "confirmSelectedSafeTransaction",
   "executeSelectedSafeTransaction",
+  "relaySelectedSafeTransaction",
   "inspectSelectedSafeTransaction",
   "gasPayerConnectionRef.current?.provider",
   "Para ejecutar una Safe Tx conecta un pagador de gas",
+  "Ejecutar con Relay",
+  "Safe Tx enviada al Relay",
   "Safe Tx ejecutada",
   "Safe Tx lista para ejecutar",
   "Confirmacion Safe enviada",
