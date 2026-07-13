@@ -12,6 +12,13 @@ const SAFE_SERVICE_URLS = Object.freeze({
 const SAFE_CLIENT_GATEWAY_URL = "https://safe-client.safe.global";
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
+const SAFE_SUPPORTED_CREATION_METHODS = new Set([
+  "createProxyWithNonce",
+  "createProxyWithNonceL2",
+  "createProxyWithCallback",
+  "createChainSpecificProxyWithNonce",
+  "createChainSpecificProxyWithNonceL2",
+]);
 
 function json(response, status, body) {
   response.status(status).json(body);
@@ -76,6 +83,18 @@ function normalizeCreationPayload(payload, sourceUrl) {
     data.salt_nonce ??
     data.salt ??
     null;
+  const method =
+    data.method ??
+    data.creationMethod ??
+    data.creation_method ??
+    data.factoryMethod ??
+    data.factory_method ??
+    null;
+  const callback =
+    data.callback ??
+    data.callbackAddress ??
+    data.callback_address ??
+    null;
 
   if (!transactionHash && !factoryAddress && !singleton && !initializer) {
     return null;
@@ -88,6 +107,11 @@ function normalizeCreationPayload(payload, sourceUrl) {
     singleton,
     initializer,
     saltNonce,
+    method:
+      typeof method === "string" && SAFE_SUPPORTED_CREATION_METHODS.has(method)
+        ? method
+        : null,
+    callback,
     raw: data,
   };
 }
