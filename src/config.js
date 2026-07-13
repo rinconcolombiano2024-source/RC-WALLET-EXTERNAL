@@ -73,6 +73,11 @@ export const RECOVERY_ROUTE_CATALOG = Object.freeze([
     requirement: "Owners, threshold, factory, singleton, initializer y salt verificables",
   },
   {
+    id: "safe-relay",
+    name: "Safe Relay / Gelato",
+    requirement: "Safe Tx con firmas suficientes y GELATO_RELAY_API_KEY configurada en Vercel",
+  },
+  {
     id: "erc-1271",
     name: "Firma de contrato EIP-1271",
     requirement: "El contrato debe validar firmas mediante isValidSignature",

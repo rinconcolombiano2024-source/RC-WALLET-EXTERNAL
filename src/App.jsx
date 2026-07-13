@@ -20,6 +20,7 @@ import {
   privateKeyToAddress,
   proposeSafeTransactionWithExternalWallet,
   proposeSafeTransactionWithPrivateKeyWallet,
+  relaySafeTransactionFromService,
   safeMirrorOwnersInclude,
   safeOwnersInclude,
   scanAllNetworks,
@@ -848,10 +849,10 @@ function getExternalExecutionRoute({
       level: "warning",
       canExecute: false,
       label: "Safe requiere mas firmas",
-      actionLabel: "Reunir firmas Safe",
+      actionLabel: "Reunir firmas y ejecutar Safe",
       signerLabel: "Owner Safe conectado",
-      gasLabel: "Gas al ejecutar",
-      reason: `Esta Safe requiere ${safeThreshold || "varias"} firmas. Crea la transaccion Safe y reune las confirmaciones antes de ejecutar.`,
+      gasLabel: "Pagador externo o Relay",
+      reason: `Esta Safe requiere ${safeThreshold || "varias"} firmas. Crea la transaccion Safe, reune las confirmaciones y luego ejecuta con pagador externo o Relay.`,
     };
   }
 
@@ -1683,6 +1684,7 @@ function SafeRescuePanel({
   onExecuteSafeTx,
   onInspectSafeTx,
   onProposeSafeTx,
+  onRelaySafeTx,
   safeTxHashInput,
   onSafeTxHashChange,
 }) {
@@ -1872,19 +1874,25 @@ function SafeRescuePanel({
             >
               Proponer en Safe
             </button>
+          </>
+        )}
+        {safe.detected && (
+          <>
             <input
               className="safe-rescue__hash-input"
               value={safeTxHashInput}
               onChange={(event) => onSafeTxHashChange(event.target.value)}
               placeholder="safeTxHash 0x..."
             />
-            <button
-              className="button button--secondary"
-              type="button"
-              onClick={onConfirmSafeTx}
-            >
-              Confirmar Safe Tx
-            </button>
+            {signerIsOwner && (
+              <button
+                className="button button--secondary"
+                type="button"
+                onClick={onConfirmSafeTx}
+              >
+                Confirmar Safe Tx
+              </button>
+            )}
             <button
               className="button button--secondary"
               type="button"
@@ -1898,6 +1906,13 @@ function SafeRescuePanel({
               onClick={onExecuteSafeTx}
             >
               Ejecutar Safe Tx
+            </button>
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={onRelaySafeTx}
+            >
+              Ejecutar con Relay
             </button>
           </>
         )}
@@ -4094,6 +4109,57 @@ export default function App() {
     }
   }, [gasPayerAddress, safeTxHashInput, selectedAsset, showStatus, targetAddress]);
 
+  const relaySelectedSafeTransaction = useCallback(async () => {
+    try {
+      if (!selectedAsset) {
+        throw new Error("Selecciona primero una Safe desplegada.");
+      }
+      const result = await relaySafeTransactionFromService({
+        chainId: selectedAsset.chainId,
+        safeTxHash: safeTxHashInput,
+      });
+
+      const transactionRecord = {
+        route: result.route,
+        hash: result.taskId ?? result.relay?.taskId ?? null,
+        hashes: [],
+        taskId: result.taskId ?? result.relay?.taskId ?? null,
+        network: selectedAsset.network,
+        token: selectedAsset.symbol,
+        amount: "Safe Tx",
+        recipient: targetAddress,
+        createdAt: new Date().toISOString(),
+      };
+      setLastTransaction({
+        ...result,
+        network: selectedAsset.network,
+        symbol: selectedAsset.symbol,
+      });
+      setTransferHistory((current) => [transactionRecord, ...current].slice(0, 25));
+
+      const copiedResult = {
+        ...result,
+        networkName: selectedAsset.networkName,
+        chainId: selectedAsset.chainId,
+        symbol: selectedAsset.symbol,
+        amount: "Safe Tx",
+        recipient: targetAddress,
+      };
+      await copyTextToClipboard(JSON.stringify(copiedResult, null, 2));
+      showStatus(
+        "Safe Tx enviada al Relay. Resultado copiado y tarea guardada en historial.",
+        "success",
+      );
+    } catch (error) {
+      showStatus(
+        error instanceof Error
+          ? error.message
+          : "No se pudo ejecutar la Safe Tx por Relay",
+        "error",
+      );
+    }
+  }, [safeTxHashInput, selectedAsset, showStatus, targetAddress]);
+
   const copyMaximumRecoveryDossier = useCallback(async () => {
     const dossier = {
       format: "rc-wallet-movement-dossier",
@@ -5932,6 +5998,7 @@ export default function App() {
                 onExecuteSafeTx={executeSelectedSafeTransaction}
                 onInspectSafeTx={inspectSelectedSafeTransaction}
                 onProposeSafeTx={proposeSelectedSafeTransaction}
+                onRelaySafeTx={relaySelectedSafeTransaction}
                 safeTxHashInput={safeTxHashInput}
                 onSafeTxHashChange={setSafeTxHashInput}
               />

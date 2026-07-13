@@ -2980,6 +2980,49 @@ export async function executeSafeTransactionFromServiceWithExternalWallet({
   });
 }
 
+export async function relaySafeTransactionFromService({ chainId, safeTxHash }) {
+  const normalizedSafeTxHash = normalizeSafeTxHash(safeTxHash);
+  const network = networkByChainId(chainId);
+  const response = await timeout(
+    fetch("/api/safe-relay", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        chainId: network.chainId,
+        safeTxHash: normalizedSafeTxHash,
+      }),
+    }),
+    30_000,
+    "API RC Safe Relay",
+  );
+  const contentType = response.headers?.get?.("content-type") ?? "";
+  const responseBody = await readSafeProposalResponse(response);
+
+  if (contentType.includes("text/html")) {
+    throw new Error(
+      "El endpoint /api/safe-relay no esta disponible en este despliegue",
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `API RC Safe Relay rechazo la ejecucion (${response.status}). ${formatSafeProposalDetail(
+        responseBody,
+      )}`,
+    );
+  }
+
+  return {
+    route: "safe-service-gelato-relay",
+    safeTxHash: normalizedSafeTxHash,
+    network,
+    relay: responseBody,
+    taskId: responseBody?.taskId ?? responseBody?.relay?.response?.taskId ?? null,
+  };
+}
+
 async function sendWithSafeOwnerSigner({
   provider,
   signer,
