@@ -6,6 +6,10 @@ const blockchainSource = readFileSync(
   "utf8",
 );
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+const configSource = readFileSync(
+  new URL("../src/config.js", import.meta.url),
+  "utf8",
+);
 const stylesSource = readFileSync(
   new URL("../src/styles.css", import.meta.url),
   "utf8",
@@ -22,8 +26,16 @@ const safeTransactionSource = readFileSync(
   new URL("../api/safe-transaction.js", import.meta.url),
   "utf8",
 );
+const safeCreationSource = readFileSync(
+  new URL("../api/safe-creation.js", import.meta.url),
+  "utf8",
+);
 const safeRelaySource = readFileSync(
   new URL("../api/safe-relay.js", import.meta.url),
+  "utf8",
+);
+const counterfactualSafeRecoverySource = readFileSync(
+  new URL("../api/counterfactual-safe-recovery.js", import.meta.url),
   "utf8",
 );
 const envExampleSource = readFileSync(
@@ -133,6 +145,16 @@ for (const required of [
 }
 
 for (const required of [
+  "worldchain-mainnet.gateway.tenderly.co",
+  "worldchain.drpc.org",
+]) {
+  assert.ok(
+    configSource.includes(required),
+    `World Chain RPC config is missing log-capable endpoint: ${required}`,
+  );
+}
+
+for (const required of [
   "SAFE_SERVICE_URLS",
   "multisig-transactions",
   "contractTransactionHash",
@@ -182,6 +204,21 @@ for (const required of [
 }
 
 for (const required of [
+  "ETHERSCAN_V2_URL",
+  "getcontractcreation",
+  "contractaddresses",
+  "ETHERSCAN_API_KEY",
+  "WORLDSCAN_API_KEY",
+  "contractCreator",
+  "payload?.result?.[0]",
+]) {
+  assert.ok(
+    safeCreationSource.includes(required),
+    `Safe creation API is missing explorer fallback: ${required}`,
+  );
+}
+
+for (const required of [
   "GELATO_RELAY_API_KEY",
   "GELATO_SPONSORED_CALL_URL",
   "safe-service-gelato-relay",
@@ -198,9 +235,55 @@ for (const required of [
   );
 }
 
+for (const required of [
+  "counterfactual-safe-recovery",
+  "targetChainIds",
+  "SAFE_PROXY_CREATION_TOPIC",
+  "SAFE_PROXY_CREATION_L2_TOPIC",
+  "SAFE_CHAIN_SPECIFIC_PROXY_CREATION_L2_TOPIC",
+  "inspectSafe",
+  "creationFromTransactionHash",
+  "creationFromReceiptLogs",
+  "readCreationFromExplorerLogs",
+  "readCreationFromExplorerGlobalLogs",
+  "readCreationFromExplorerInternalTransactions",
+  "readCreationFromExplorerNormalTransactions",
+  "readCreationFromExplorer",
+  "creationFromMatchedLog",
+  "searchCreationAroundTransaction",
+  "searchGlobalProxyCreationLogs",
+  "includeUnindexedLogs",
+  "includeGlobalFactorySearch",
+  "globalLogSearch",
+  "Promise.allSettled",
+  "normalizeManualSourceDeploymentInput",
+  "manualSourceDeployment",
+  "plannedTransfers",
+  "summarizeMovementPlan",
+  "canMoveTokens",
+  "scanCursor",
+  "nextScan",
+  "readCreationFromServices",
+  "searchCreationLogs",
+  "analyzeCounterfactualSafeRecovery",
+  "sourcePrediction",
+  "deployOnlyIfPredictedAddressMatches",
+  "read-predict-prepare-only",
+]) {
+  assert.ok(
+    counterfactualSafeRecoverySource.includes(required),
+    `Counterfactual Safe recovery API is missing: ${required}`,
+  );
+}
+
 assert.ok(
   envExampleSource.includes("GELATO_RELAY_API_KEY="),
   "env.example must document GELATO_RELAY_API_KEY",
+);
+assert.ok(
+  envExampleSource.includes("ETHERSCAN_API_KEY=") &&
+    envExampleSource.includes("WORLDSCAN_API_KEY="),
+  "env.example must document explorer API keys for Safe creation lookup",
 );
 
 assert.equal(
