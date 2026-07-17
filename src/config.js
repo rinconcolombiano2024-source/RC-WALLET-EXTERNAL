@@ -140,6 +140,8 @@ export const NETWORKS = Object.freeze([
     chainHex: "0x1e0",
     symbol: "ETH",
     rpcUrls: [
+      "https://worldchain-mainnet.gateway.tenderly.co",
+      "https://worldchain.drpc.org",
       "https://worldchain-mainnet.g.alchemy.com/public",
     ],
     explorer: "https://worldscan.org",
