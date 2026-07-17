@@ -10,6 +10,7 @@ const SAFE_SERVICE_URLS = Object.freeze({
 });
 
 const SAFE_CLIENT_GATEWAY_URL = "https://safe-client.safe.global";
+const ETHERSCAN_V2_URL = "https://api.etherscan.io/v2/api";
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const SAFE_SUPPORTED_CREATION_METHODS = new Set([
@@ -22,6 +23,16 @@ const SAFE_SUPPORTED_CREATION_METHODS = new Set([
 
 function json(response, status, body) {
   response.status(status).json(body);
+}
+
+function explorerApiKey() {
+  return (
+    process.env.ETHERSCAN_API_KEY ||
+    process.env.WORLDSCAN_API_KEY ||
+    process.env.WORLD_SCAN_API_KEY ||
+    process.env.EXPLORER_API_KEY ||
+    ""
+  );
 }
 
 async function fetchJson(url) {
@@ -48,7 +59,12 @@ async function fetchJson(url) {
 }
 
 function normalizeCreationPayload(payload, sourceUrl) {
-  const data = payload?.data ?? payload?.results?.[0] ?? payload;
+  const data =
+    payload?.creation ??
+    payload?.data ??
+    payload?.results?.[0] ??
+    payload?.result?.[0] ??
+    payload;
   if (!data || typeof data !== "object") return null;
 
   const transactionHash =
@@ -56,6 +72,7 @@ function normalizeCreationPayload(payload, sourceUrl) {
     data.transaction_hash ??
     data.txHash ??
     data.tx_hash ??
+    data.hash ??
     data.creationTxHash ??
     data.transaction?.txHash ??
     data.transaction?.hash ??
@@ -65,6 +82,8 @@ function normalizeCreationPayload(payload, sourceUrl) {
     data.factory_address ??
     data.factory ??
     data.createdBy ??
+    data.contractCreator ??
+    data.contract_creator ??
     null;
   const singleton =
     data.masterCopy ??
@@ -116,6 +135,19 @@ function normalizeCreationPayload(payload, sourceUrl) {
   };
 }
 
+function etherscanContractCreationUrl(chainId, safeAddress) {
+  const apiKey = explorerApiKey();
+  if (!apiKey) return null;
+
+  const url = new URL(ETHERSCAN_V2_URL);
+  url.searchParams.set("chainid", String(chainId));
+  url.searchParams.set("module", "contract");
+  url.searchParams.set("action", "getcontractcreation");
+  url.searchParams.set("contractaddresses", safeAddress);
+  url.searchParams.set("apikey", apiKey);
+  return url.toString();
+}
+
 async function readSafeCreation(chainId, safeAddress) {
   const serviceUrls = SAFE_SERVICE_URLS[chainId] ?? [];
   const urls = [
@@ -124,7 +156,9 @@ async function readSafeCreation(chainId, safeAddress) {
     ),
     `${SAFE_CLIENT_GATEWAY_URL}/v1/chains/${chainId}/safes/${safeAddress}/creation`,
     `${SAFE_CLIENT_GATEWAY_URL}/v1/chains/${chainId}/safes/${safeAddress}`,
-  ];
+  ].filter(Boolean);
+  const explorerCreationUrl = etherscanContractCreationUrl(chainId, safeAddress);
+  if (explorerCreationUrl) urls.push(explorerCreationUrl);
   const errors = [];
 
   for (const url of urls) {
