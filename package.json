@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test:wallet": "node tests/wallet-core.test.mjs && node tests/recovery-routes.test.mjs",
+    "test:wallet": "node tests/wallet-core.test.mjs && node tests/recovery-routes.test.mjs && node tests/counterfactual-safe-engine.test.mjs && node tests/counterfactual-safe-recovery-api.test.mjs",
+    "lint": "node tests/lint-recovery-security.test.mjs",
+    "typecheck": "node tests/typecheck-imports.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
