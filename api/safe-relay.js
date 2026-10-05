@@ -1,5 +1,7 @@
 import { ethers } from "ethers";
-
+import {
+  readSession,
+} from "../server/session.js";
 const SAFE_SERVICE_URLS = Object.freeze({
   1: ["https://safe-transaction-mainnet.safe.global"],
   10: ["https://safe-transaction-optimism.safe.global"],
@@ -25,10 +27,85 @@ const SAFE_EXEC_INTERFACE = new ethers.Interface([
   "function execTransaction(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,bytes signatures) payable returns (bool success)",
 ]);
 
-function setCors(response) {
-  response.setHeader("Access-Control-Allow-Origin", "*");
-  response.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "content-type");
+function configuredOrigins() {
+  return String(process.env.RC_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function requestOriginAllowed(request) {
+  const origin = String(request.headers.origin ?? "").trim();
+
+  // Peticiones same-origin sin Origin pueden pasar.
+  if (!origin) {
+    return true;
+  }
+
+  const allowed = configuredOrigins();
+
+  if (allowed.includes(origin)) {
+    return true;
+  }
+
+  const forwardedHost =
+    request.headers["x-forwarded-host"] ||
+    request.headers.host;
+
+  const forwardedProto =
+    request.headers["x-forwarded-proto"] ||
+    (process.env.NODE_ENV === "production"
+      ? "https"
+      : "http");
+
+  if (forwardedHost) {
+    const sameOrigin =
+      `${forwardedProto}://${forwardedHost}`;
+
+    if (origin === sameOrigin) {
+      return true;
+    }
+  }
+
+  if (
+    process.env.NODE_ENV !== "production" &&
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function setCors(request, response) {
+  const origin = String(request.headers.origin ?? "").trim();
+
+  if (origin && requestOriginAllowed(request)) {
+    response.setHeader(
+      "Access-Control-Allow-Origin",
+      origin,
+    );
+
+    response.setHeader(
+      "Vary",
+      "Origin",
+    );
+  }
+
+  response.setHeader(
+    "Access-Control-Allow-Credentials",
+    "true",
+  );
+
+  response.setHeader(
+    "Access-Control-Allow-Methods",
+    "POST, OPTIONS",
+  );
+
+  response.setHeader(
+    "Access-Control-Allow-Headers",
+    "content-type",
+  );
 }
 
 function json(response, status, body) {
