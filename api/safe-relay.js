@@ -331,7 +331,7 @@ async function readSafeTransaction(chainId, safeTxHash) {
 }
 
 export default async function handler(request, response) {
-  setCors(response);
+ setCors(request, response);
 
   if (request.method === "OPTIONS") {
     return response.status(204).end();
