@@ -22,7 +22,107 @@ const HASH_PATTERN = /^0x[a-fA-F0-9]{64}$/;
 const HEX_PATTERN = /^0x(?:[a-fA-F0-9]{2})*$/;
 const SIGNATURE_PATTERN = /^0x[a-fA-F0-9]{130}$/;
 const UINT_PATTERN = /^(0|[1-9][0-9]*)$/;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const DEFAULT_RATE_LIMIT = 5;
 
+const relayRateBuckets =
+  globalThis.__rcWalletRelayRateBuckets ??
+  new Map();
+
+globalThis.__rcWalletRelayRateBuckets =
+  relayRateBuckets;
+
+function clientIp(request) {
+  const forwarded =
+    request.headers["x-forwarded-for"];
+
+  if (typeof forwarded === "string") {
+    return forwarded
+      .split(",")[0]
+      .trim();
+  }
+
+  return (
+    request.headers["x-real-ip"] ||
+    "unknown"
+  );
+}
+
+function relayRateLimit(
+  request,
+  session,
+) {
+  const now = Date.now();
+
+  const configuredLimit =
+    Number.parseInt(
+      process.env
+        .RC_RELAY_MAX_PER_MINUTE ??
+        "",
+      10,
+    );
+
+  const limit =
+    Number.isInteger(
+      configuredLimit,
+    ) &&
+    configuredLimit > 0
+      ? Math.min(
+          configuredLimit,
+          20,
+        )
+      : DEFAULT_RATE_LIMIT;
+
+  const key =
+    `${session.address}:${clientIp(
+      request,
+    )}`;
+
+  const previous =
+    relayRateBuckets.get(key) ??
+    [];
+
+  const active =
+    previous.filter(
+      (timestamp) =>
+        now - timestamp <
+        RATE_LIMIT_WINDOW_MS,
+    );
+
+  if (active.length >= limit) {
+    return {
+      allowed: false,
+
+      retryAfterSeconds:
+        Math.max(
+          1,
+          Math.ceil(
+            (
+              RATE_LIMIT_WINDOW_MS -
+              (now - active[0])
+            ) / 1000,
+          ),
+        ),
+    };
+  }
+
+  active.push(now);
+
+  relayRateBuckets.set(
+    key,
+    active,
+  );
+
+  return {
+    allowed: true,
+    remaining:
+      Math.max(
+        0,
+        limit -
+          active.length,
+      ),
+  };
+}
 const SAFE_EXEC_INTERFACE = new ethers.Interface([
   "function execTransaction(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,bytes signatures) payable returns (bool success)",
 ]);
@@ -211,10 +311,15 @@ function requireHex(value, field) {
 }
 
 function requireOperation(value) {
-  const operation = Number(value ?? 0);
-  if (operation !== 0 && operation !== 1) {
-    throw new Error("operation invalida");
+  const operation =
+    Number(value ?? 0);
+
+  if (operation !== 0) {
+    throw new Error(
+      "RC Wallet Relay solo permite Safe CALL (operation=0)",
+    );
   }
+
   return operation;
 }
 
