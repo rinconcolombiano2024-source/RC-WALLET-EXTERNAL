@@ -108,9 +108,15 @@ function setCors(request, response) {
   );
 }
 
-function json(response, status, body) {
-  setCors(response);
-  response.status(status).json(body);
+function json(request, response, status, body) {
+  setCors(request, response);
+
+  response.setHeader(
+    "Cache-Control",
+    "no-store",
+  );
+
+  return response.status(status).json(body);
 }
 
 function serviceUrl(chainId) {
@@ -331,17 +337,18 @@ export default async function handler(request, response) {
     return response.status(204).end();
   }
   if (request.method !== "POST") {
-    return json(response, 405, { error: "Metodo no permitido" });
-  }
-
+   return json(request, response, 405, {
+  error: "Metodo no permitido",
+});
   const body = request.body ?? {};
   const chainId = body.chainId;
   const safeTxHash = body.safeTxHash;
   const validationError = validateRelayRequest({ chainId, safeTxHash });
 
   if (validationError) {
-    return json(response, 400, { error: validationError });
-  }
+ return json(request, response, 400, {
+  error: validationError,
+});
 
   try {
     const safeLookup = await readSafeTransaction(chainId, safeTxHash);
@@ -353,10 +360,10 @@ export default async function handler(request, response) {
       });
     }
     if (transaction.isExecuted || transaction.is_executed) {
-      return json(response, 409, {
-        error: "Esta Safe Tx ya aparece como ejecutada",
-        safeTxHash,
-      });
+     return json(request, response, 409, {
+  error: "Esta Safe Tx ya aparece como ejecutada",
+  safeTxHash,
+});
     }
 
     const safeTx = normalizeSafeServiceTransaction(transaction);
@@ -399,8 +406,8 @@ export default async function handler(request, response) {
         });
       }
 
-      return json(response, 200, {
-        ok: true,
+      return json(request, response, 200, {
+  ok: true,
         route: "safe-service-gelato-relay",
         safeTxHash,
         chainId: Number(chainId),
