@@ -331,107 +331,247 @@ async function readSafeTransaction(chainId, safeTxHash) {
 }
 
 export default async function handler(request, response) {
- setCors(request, response);
+  if (!requestOriginAllowed(request)) {
+    return response.status(403).json({
+      error: "Origin no autorizado",
+    });
+  }
+
+  setCors(request, response);
 
   if (request.method === "OPTIONS") {
     return response.status(204).end();
   }
+
   if (request.method !== "POST") {
-   return json(request, response, 405, {
-  error: "Metodo no permitido",
-});
+    return json(request, response, 405, {
+      error: "Metodo no permitido",
+    });
+  }
+
+  let session;
+
+  try {
+    session = readSession(request);
+  } catch {
+    return json(request, response, 503, {
+      error:
+        "La seguridad de sesión del servidor no está configurada correctamente.",
+    });
+  }
+
+  if (!session) {
+    return json(request, response, 401, {
+      error:
+        "Sesión World inválida o expirada. Inicia sesión nuevamente.",
+    });
+  }
+
+  const rateLimit = relayRateLimit(request, session);
+
+  if (!rateLimit.allowed) {
+    response.setHeader(
+      "Retry-After",
+      String(rateLimit.retryAfterSeconds),
+    );
+
+    return json(request, response, 429, {
+      error:
+        "Demasiadas solicitudes de Relay. Intenta nuevamente más tarde.",
+    });
+  }
+
   const body = request.body ?? {};
   const chainId = body.chainId;
   const safeTxHash = body.safeTxHash;
-  const validationError = validateRelayRequest({ chainId, safeTxHash });
+
+  const validationError = validateRelayRequest({
+    chainId,
+    safeTxHash,
+  });
 
   if (validationError) {
- return json(request, response, 400, {
-  error: validationError,
-});
+    return json(request, response, 400, {
+      error: validationError,
+    });
+  }
 
   try {
-    const safeLookup = await readSafeTransaction(chainId, safeTxHash);
-    const transaction = safeLookup.data?.response ?? safeLookup.data;
-    if (!transaction || typeof transaction !== "object") {
-      return json(response, 502, {
-        error: "Safe Transaction Service devolvio una respuesta invalida",
+    const safeLookup = await readSafeTransaction(
+      chainId,
+      safeTxHash,
+    );
+
+    const transaction =
+      safeLookup.data?.response ??
+      safeLookup.data;
+
+    if (
+      !transaction ||
+      typeof transaction !== "object"
+    ) {
+      return json(request, response, 502, {
+        error:
+          "Safe Transaction Service devolvio una respuesta invalida",
         source: safeLookup,
       });
     }
-    if (transaction.isExecuted || transaction.is_executed) {
-     return json(request, response, 409, {
-  error: "Esta Safe Tx ya aparece como ejecutada",
-  safeTxHash,
-});
+
+    if (
+      transaction.isExecuted ||
+      transaction.is_executed
+    ) {
+      return json(request, response, 409, {
+        error:
+          "Esta Safe Tx ya aparece como ejecutada",
+        safeTxHash,
+      });
     }
 
-    const safeTx = normalizeSafeServiceTransaction(transaction);
-    const executionSignatures = buildSafeExecutionSignatures(transaction);
-    const execData = SAFE_EXEC_INTERFACE.encodeFunctionData("execTransaction", [
-      safeTx.to,
-      safeTx.value,
-      safeTx.data,
-      safeTx.operation,
-      safeTx.safeTxGas,
-      safeTx.baseGas,
-      safeTx.gasPrice,
-      safeTx.gasToken,
-      safeTx.refundReceiver,
-      executionSignatures.signatures,
-    ]);
+    const safeTx =
+      normalizeSafeServiceTransaction(
+        transaction,
+      );
+
+    /*
+     * P0 SECURITY:
+     * La Safe que intenta utilizar nuestro patrocinio
+     * debe coincidir exactamente con la wallet
+     * autenticada mediante World SIWE.
+     */
+    if (
+      safeTx.safe.toLowerCase() !==
+      session.address.toLowerCase()
+    ) {
+      return json(request, response, 403, {
+        error:
+          "La Safe de la transacción no coincide con la cuenta World autenticada.",
+      });
+    }
+
+    const executionSignatures =
+      buildSafeExecutionSignatures(
+        transaction,
+      );
+
+    const execData =
+      SAFE_EXEC_INTERFACE.encodeFunctionData(
+        "execTransaction",
+        [
+          safeTx.to,
+          safeTx.value,
+          safeTx.data,
+          safeTx.operation,
+          safeTx.safeTxGas,
+          safeTx.baseGas,
+          safeTx.gasPrice,
+          safeTx.gasToken,
+          safeTx.refundReceiver,
+          executionSignatures.signatures,
+        ],
+      );
+
     const relayRequest = {
       chainId: Number(chainId),
       target: safeTx.safe,
       data: execData,
     };
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20_000);
+
+    const controller =
+      new AbortController();
+
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      20_000,
+    );
 
     try {
-      const upstream = await fetch(GELATO_SPONSORED_CALL_URL, {
-        method: "POST",
-        headers: gelatoHeaders(gelatoApiKey()),
-        body: JSON.stringify(relayRequest),
-        signal: controller.signal,
-      });
-      const relayResponse = await readJsonResponse(upstream);
+      const upstream = await fetch(
+        GELATO_SPONSORED_CALL_URL,
+        {
+          method: "POST",
+          headers: gelatoHeaders(
+            gelatoApiKey(),
+          ),
+          body: JSON.stringify(
+            relayRequest,
+          ),
+          signal: controller.signal,
+        },
+      );
+
+      const relayResponse =
+        await readJsonResponse(upstream);
 
       if (!upstream.ok) {
-        return json(response, upstream.status, {
-          error: "Gelato Relay rechazo la ejecucion patrocinada",
-          status: upstream.status,
-          detail: relayResponse,
-          route: "safe-service-gelato-relay",
-        });
+        return json(
+          request,
+          response,
+          upstream.status,
+          {
+            error:
+              "Gelato Relay rechazo la ejecucion patrocinada",
+            status: upstream.status,
+            detail: relayResponse,
+            route:
+              "safe-service-gelato-relay",
+          },
+        );
       }
 
-      return json(request, response, 200, {
-  ok: true,
-        route: "safe-service-gelato-relay",
-        safeTxHash,
-        chainId: Number(chainId),
-        safe: safeTx.safe,
-        taskId: relayResponse?.taskId ?? relayResponse?.task_id ?? null,
-        signaturesUsed: executionSignatures.owners,
-        confirmationsRequired: executionSignatures.confirmationsRequired,
-        relay: {
-          url: GELATO_SPONSORED_CALL_URL,
-          status: upstream.status,
-          response: relayResponse,
+      return json(
+        request,
+        response,
+        200,
+        {
+          ok: true,
+          route:
+            "safe-service-gelato-relay",
+          safeTxHash,
+          chainId: Number(chainId),
+          safe: safeTx.safe,
+          taskId:
+            relayResponse?.taskId ??
+            relayResponse?.task_id ??
+            null,
+
+          signaturesUsed:
+            executionSignatures.owners,
+
+          confirmationsRequired:
+            executionSignatures.confirmationsRequired,
+
+          relay: {
+            url:
+              GELATO_SPONSORED_CALL_URL,
+            status: upstream.status,
+            response: relayResponse,
+          },
         },
-      });
+      );
     } finally {
       clearTimeout(timeoutId);
     }
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "No se pudo ejecutar por Relay";
-    return json(response, error.status ?? 502, {
-      error: message,
-      detail: error.detail ?? null,
-      url: error.url ?? null,
-      route: "safe-service-gelato-relay",
-    });
+      error instanceof Error
+        ? error.message
+        : "No se pudo ejecutar por Relay";
+
+    return json(
+      request,
+      response,
+      error.status ?? 502,
+      {
+        error: message,
+        detail:
+          error.detail ?? null,
+        url:
+          error.url ?? null,
+        route:
+          "safe-service-gelato-relay",
+      },
+    );
   }
+}
 }
