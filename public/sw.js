@@ -1,4 +1,4 @@
-const CACHE_NAME = "rc-wallet-external-v6";
+const CACHE_NAME = "rc-wallet-external-v7-security-1";
 const APP_SHELL = ["/", "/index.html", "/manifest.webmanifest", "/rc-icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -31,6 +31,11 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  // SECURITY: nunca interceptar ni cachear rutas API.
+// Nonces SIWE, sesiones, Safe y Relay deben ir siempre al servidor.
+if (url.pathname.startsWith("/api/")) {
+  return;
+}
 
   if (request.mode === "navigate") {
     event.respondWith(
