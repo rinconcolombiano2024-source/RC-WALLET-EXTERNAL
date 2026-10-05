@@ -1,3 +1,7 @@
+import {
+  createSessionCookie,
+} from "../server/session.js";
+
 import { verifySiweMessage } from "@worldcoin/minikit-js/siwe";
 
 const WORLD_ID_STATEMENTS = [
@@ -62,10 +66,10 @@ export default async function handler(req, res) {
     }
 
     const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-    res.setHeader(
-      "Set-Cookie",
-      `rc_siwe_nonce=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure}`,
-    );
+  res.setHeader("Set-Cookie", [
+  `rc_siwe_nonce=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secure}`,
+  createSessionCookie(verification.siweMessageData.address),
+]);
     res.setHeader("Cache-Control", "no-store");
 
     return res.status(200).json({
