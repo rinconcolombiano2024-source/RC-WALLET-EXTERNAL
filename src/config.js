@@ -23,7 +23,20 @@ export const ERC4337_ENTRYPOINTS = Object.freeze([
     label: "EntryPoint ERC-4337 v0.6",
   },
 ]);
+export const SAFE_4337_V030 = Object.freeze({
+  version: "0.3.0",
 
+  entryPointVersion: "v0.7",
+
+  entryPoint:
+    "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+
+  moduleSetup:
+    "0x2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47",
+
+  module:
+    "0x75cf11467937ce3F2f357CE24ffc3DBF8fD5c226",
+});
 export const SAFE_FACTORY_CANDIDATES = Object.freeze([
   {
     version: "1.4.1",
