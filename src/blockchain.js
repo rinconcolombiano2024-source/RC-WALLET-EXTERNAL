@@ -36,6 +36,7 @@ const GAS_LIMIT_BUFFER_BPS = 12_000n;
 const GAS_PRICE_BUFFER_BPS = 12_000n;
 const SAFE_OPERATION_CALL = 0;
 const SAFE_CREATION_LOG_BATCH_SIZE = 250_000;
+const SAFE_CREATION_LOG_MAX_BATCHES = 160;
 const SAFE_CHAIN_SPECIFIC_CREATION_METHODS = new Set([
   "createChainSpecificProxyWithNonce",
   "createChainSpecificProxyWithNonceL2",
@@ -78,12 +79,17 @@ function extractAddressCandidate(address) {
 }
 
 export function normalizeAddress(address) {
-  const candidate = extractAddressCandidate(address);
+  const cleaned = cleanAddressInput(address);
+  const candidate = cleaned.startsWith("0X")
+    ? `0x${cleaned.slice(2)}`
+    : cleaned;
+
   if (!/^0x[a-fA-F0-9]{40}$/.test(candidate)) {
     throw new Error(
       "Introduce una dirección EVM completa: debe empezar por 0x y tener 42 caracteres",
     );
   }
+
   return ethers.getAddress(candidate);
 }
 
@@ -566,12 +572,20 @@ async function getSafeProxyCreationLogs(provider, factory, proxy) {
       "latest block",
     );
     const logs = [];
+    let scannedBatches = 0;
+
     for (
       let toBlock = latestBlock;
-      toBlock >= 0 && logs.length === 0;
+      toBlock >= 0 &&
+      logs.length === 0 &&
+      scannedBatches < SAFE_CREATION_LOG_MAX_BATCHES;
       toBlock -= SAFE_CREATION_LOG_BATCH_SIZE
     ) {
-      const fromBlock = Math.max(0, toBlock - SAFE_CREATION_LOG_BATCH_SIZE + 1);
+      const fromBlock = Math.max(
+        0,
+        toBlock - SAFE_CREATION_LOG_BATCH_SIZE + 1,
+      );
+
       const batch = await timeout(
         provider.getLogs({
           ...topicOnlyFilter,
@@ -581,8 +595,16 @@ async function getSafeProxyCreationLogs(provider, factory, proxy) {
         12_000,
         "Safe ProxyCreation logs batch",
       );
-      logs.push(...batch.filter((log) => safeProxyCreationLogMatches(log, normalizedProxy)));
+
+      scannedBatches += 1;
+
+      logs.push(
+        ...batch.filter((log) =>
+          safeProxyCreationLogMatches(log, normalizedProxy),
+        ),
+      );
     }
+
     return logs;
   } catch {
     return [];
@@ -1991,7 +2013,19 @@ async function findSafeDeploymentOnWorldChain(owner) {
   })();
 
   safeDeploymentCache.set(cacheKey, promise);
-  return promise;
+
+  try {
+    const deployment = await promise;
+
+    if (!deployment) {
+      safeDeploymentCache.delete(cacheKey);
+    }
+
+    return deployment;
+  } catch (error) {
+    safeDeploymentCache.delete(cacheKey);
+    throw error;
+  }
 }
 
 function safeSameAddressForCore(left, right) {
@@ -2002,7 +2036,12 @@ function safeSameAddressForCore(left, right) {
   }
 }
 
-async function inspectCounterfactualSafeMirror(provider, network, owner, hasCode) {
+async function inspectCounterfactualSafeMirror(
+  provider,
+  network,
+  owner,
+  hasCode,
+) {
   if (hasCode || network.chainId === WORLD_CHAIN_ID) {
     return {
       checked: false,
@@ -2016,6 +2055,7 @@ async function inspectCounterfactualSafeMirror(provider, network, owner, hasCode
   const worldNetwork = NETWORKS.find(
     (item) => item.chainId === WORLD_CHAIN_ID,
   );
+
   if (!worldNetwork) {
     return {
       checked: false,
@@ -2026,12 +2066,17 @@ async function inspectCounterfactualSafeMirror(provider, network, owner, hasCode
 
   try {
     const worldProvider = await getProvider(worldNetwork);
+
     const worldCode = await timeout(
       worldProvider.getCode(owner),
       7_000,
       "World Chain Safe espejo",
     );
-    const worldHasCode = Boolean(worldCode && worldCode !== "0x");
+
+    const worldHasCode = Boolean(
+      worldCode && worldCode !== "0x",
+    );
+
     const worldSafe = await inspectSafeAccount(
       worldProvider,
       owner,
@@ -2050,58 +2095,59 @@ async function inspectCounterfactualSafeMirror(provider, network, owner, hasCode
       };
     }
 
-    let deployment = null;
+    let sourceDeployment = null;
+    let validatedDeployment = null;
     let deploymentError = null;
+
     try {
-      deployment = await findSafeDeploymentOnWorldChain(owner);
+      sourceDeployment =
+        await findSafeDeploymentOnWorldChain(owner);
+
+      if (sourceDeployment) {
+        /*
+         * IMPORTANT:
+         * No inventamos un segundo criterio de "ready".
+         *
+         * La deteccion automatica reutiliza exactamente la misma
+         * validacion estricta que la ruta manual y el preflight
+         * inmediatamente anterior al deployment.
+         */
+        validatedDeployment =
+          await validateManualSafeMirrorDeployment({
+            network,
+            targetAddress: owner,
+            manualDeployment: sourceDeployment,
+          });
+      }
     } catch (error) {
       deploymentError =
         error instanceof Error
           ? error.message
-          : "No se pudo recuperar la creacion original de la Safe";
+          : "No se pudo verificar el deployment original de la Safe";
     }
-    let targetPrediction = null;
-    let targetPredictionMatches = false;
-    let targetFactoryHasCode = false;
-    let targetSingletonHasCode = false;
 
-    if (deployment) {
-      const [factoryCode, singletonCode] = await Promise.all([
-        timeout(
-          provider.getCode(deployment.factory),
-          7_000,
-          "Safe factory target code",
-        ),
-        timeout(
-          provider.getCode(deployment.singleton),
-          7_000,
-          "Safe singleton target code",
-        ),
-      ]);
-      targetFactoryHasCode = Boolean(factoryCode && factoryCode !== "0x");
-      targetSingletonHasCode = Boolean(singletonCode && singletonCode !== "0x");
-
-      if (
-        deployment.canReplayCrossChain &&
-        targetFactoryHasCode &&
-        targetSingletonHasCode
-      ) {
-        targetPrediction = await predictSafeProxyAddress({
-          provider,
-          factory: deployment.factory,
-          singleton: deployment.singleton,
-          initializer: deployment.initializer,
-          saltNonce: deployment.saltNonce,
-          callback: deployment.callback,
-          method: deployment.method,
-          chainId: network.chainId,
-        });
-        targetPredictionMatches = safeSameAddressForCore(
-          targetPrediction,
-          owner,
-        );
-      }
-    }
+    const deployment = sourceDeployment
+      ? validatedDeployment
+        ? {
+            ...sourceDeployment,
+            ...validatedDeployment,
+          }
+        : {
+            ...sourceDeployment,
+            targetChainId: network.chainId,
+            targetNetworkName: network.name,
+            targetPrediction: null,
+            targetPredictionMatches: false,
+            targetFactoryHasCode: false,
+            targetSingletonHasCode: false,
+            targetSetupToHasCode: false,
+            targetFallbackHandlerHasCode: false,
+            targetModulesHaveCode: false,
+            sourceProofVerified: false,
+            ready: false,
+            validationError: deploymentError,
+          }
+      : null;
 
     return {
       checked: true,
@@ -2115,26 +2161,12 @@ async function inspectCounterfactualSafeMirror(provider, network, owner, hasCode
       modules: worldSafe.modules,
       modulesReadable: worldSafe.modulesReadable,
       deploymentRequired: true,
-      deployment: deployment
-        ? {
-            ...deployment,
-            targetChainId: network.chainId,
-            targetNetworkName: network.name,
-            targetPrediction,
-            targetPredictionMatches,
-            targetFactoryHasCode,
-            targetSingletonHasCode,
-            ready:
-              deployment.canReplayCrossChain &&
-              targetPredictionMatches &&
-              targetFactoryHasCode &&
-              targetSingletonHasCode,
-          }
-        : null,
+      deployment,
       deploymentError,
-      requirement:
-        deployment
-          ? "Desplegar la misma Safe en esta red y ejecutar desde owner"
+      requirement: deployment?.ready
+        ? "Safe original verificada: CREATE2 origen/destino y dependencias de destino coinciden"
+        : sourceDeployment
+          ? "Deployment original encontrado, pero alguna barrera de seguridad de destino no fue superada"
           : "Encontrar factory, singleton, initializer y salt originales antes de desplegar la Safe",
     };
   } catch (error) {
@@ -2150,7 +2182,6 @@ async function inspectCounterfactualSafeMirror(provider, network, owner, hasCode
     };
   }
 }
-
 async function inspectAccount(provider, network, owner, accountCode, nativeBalance) {
   const hasCode = Boolean(accountCode && accountCode !== "0x");
   const [safe, erc1271, entryPoints, counterfactualSafe] = await Promise.all([
