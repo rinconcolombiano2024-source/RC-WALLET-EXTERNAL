@@ -351,7 +351,9 @@ export const SAFE_PROXY_FACTORY_ABI = Object.freeze([
   "event ProxyCreationL2(address indexed proxy, address singleton, bytes initializer, uint256 saltNonce)",
   "event ChainSpecificProxyCreationL2(address indexed proxy, address singleton, bytes initializer, uint256 saltNonce, uint256 chainId)",
 ]);
-
+export const SAFE_MODULE_SETUP_ABI = Object.freeze([
+  "function enableModules(address[] modules)",
+]);
 export const ERC1271_ABI = Object.freeze([
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)",
 ]);
