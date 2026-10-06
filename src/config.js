@@ -13,6 +13,11 @@ export const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
 export const ERC4337_ENTRYPOINTS = Object.freeze([
   {
+    version: "v0.7",
+    address: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    label: "EntryPoint ERC-4337 v0.7",
+  },
+  {
     version: "v0.6",
     address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
     label: "EntryPoint ERC-4337 v0.6",
