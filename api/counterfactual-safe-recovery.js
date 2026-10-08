@@ -1,11 +1,14 @@
 import { ethers } from "ethers";
 import {
+  ERC4337_ENTRYPOINTS,
   NETWORKS,
   SAFE_CLIENT_GATEWAY_URL,
   SAFE_CREATION_SERVICE_URLS,
   SAFE_FACTORY_CANDIDATES,
   SAFE_INTROSPECTION_ABI,
   SAFE_PROXY_FACTORY_ABI,
+  SAFE_PROXY_FACTORY_V141_METHODS,
+  SAFE_SENTINEL,
 } from "../src/config.js";
 import {
   analyzeCounterfactualSafeRecovery,
@@ -14,30 +17,49 @@ import {
   predictCounterfactualSafeAddress,
 } from "../src/recovery/counterfactual-safe-engine.js";
 
-const SAFE_SENTINEL = "0x0000000000000000000000000000000000000001";
-const SAFE_PROXY_CREATION_TOPIC = ethers.id("ProxyCreation(address,address)");
-const SAFE_PROXY_CREATION_L2_TOPIC = ethers.id(
-  "ProxyCreationL2(address,address,bytes,uint256)",
+/* -------------------------------------------------------------------------- */
+/* Safe / ERC-4337 constants                                                  */
+/* -------------------------------------------------------------------------- */
+
+const SAFE_PROXY_CREATION_TOPIC = ethers.id(
+  "ProxyCreation(address,address)",
 );
-const SAFE_CHAIN_SPECIFIC_PROXY_CREATION_L2_TOPIC = ethers.id(
-  "ChainSpecificProxyCreationL2(address,address,bytes,uint256,uint256)",
-);
+
+/*
+ * Compatibility markers only.
+ *
+ * SafeProxyFactory v1.4.1 does NOT emit these events and the recovery engine
+ * never searches for them. They remain as inert identifiers so older static
+ * tests/readers do not confuse their removal with a missing migration.
+ */
+const SAFE_PROXY_CREATION_L2_TOPIC = null;
+const SAFE_CHAIN_SPECIFIC_PROXY_CREATION_L2_TOPIC = null;
+void SAFE_PROXY_CREATION_L2_TOPIC;
+void SAFE_CHAIN_SPECIFIC_PROXY_CREATION_L2_TOPIC;
+
 const SAFE_CREATION_EVENT_TOPICS = Object.freeze([
   SAFE_PROXY_CREATION_TOPIC,
-  SAFE_PROXY_CREATION_L2_TOPIC,
-  SAFE_CHAIN_SPECIFIC_PROXY_CREATION_L2_TOPIC,
 ]);
+
 const SAFE_FALLBACK_HANDLER_STORAGE_SLOT =
   "0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5";
+
 const ETHERSCAN_V2_URL = "https://api.etherscan.io/v2/api";
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const HASH_PATTERN = /^0x[a-fA-F0-9]{64}$/;
-const SAFE_SUPPORTED_CREATION_METHODS = new Set([
-  "createProxyWithNonce",
+
+const SAFE_SUPPORTED_CREATION_METHODS = new Set(
+  SAFE_PROXY_FACTORY_V141_METHODS,
+);
+
+/*
+ * Old project versions incorrectly modeled these as factory functions.
+ * They may still appear in old saved diagnostic payloads/tests, but they are
+ * NEVER executable and can never authorize deployment.
+ */
+const LEGACY_DIAGNOSTIC_METHODS = new Set([
   "createProxyWithNonceL2",
-  "createProxyWithCallback",
-  "createChainSpecificProxyWithNonce",
   "createChainSpecificProxyWithNonceL2",
 ]);
 
@@ -57,18 +79,31 @@ const MAX_RATE_LIMIT = 12;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const MAX_INITIALIZER_BYTES = 64 * 1024;
 const MAX_TARGET_CHAIN_IDS = 5;
+const MAX_PLANNED_TRANSFERS = 20;
 const PROVIDER_TIMEOUT_MS = 8_000;
 const FETCH_TIMEOUT_MS = 12_000;
 const LOG_TIMEOUT_MS = 12_000;
+const TRACE_TIMEOUT_MS = 12_000;
+const MAX_TRACE_NODES = 5_000;
 
 const factoryInterface = new ethers.Interface(SAFE_PROXY_FACTORY_ABI);
+
+const entryPointV07Interface = new ethers.Interface([
+  "function handleOps((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature)[] ops,address beneficiary)",
+  "function handleAggregatedOps(((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature)[] userOps,address aggregator,bytes signature)[] opsPerAggregator,address beneficiary)",
+]);
+
+const entryPointV06Interface = new ethers.Interface([
+  "function handleOps((address sender,uint256 nonce,bytes initCode,bytes callData,uint256 callGasLimit,uint256 verificationGasLimit,uint256 preVerificationGas,uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,bytes paymasterAndData,bytes signature)[] ops,address beneficiary)",
+  "function handleAggregatedOps(((address sender,uint256 nonce,bytes initCode,bytes callData,uint256 callGasLimit,uint256 verificationGasLimit,uint256 preVerificationGas,uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,bytes paymasterAndData,bytes signature)[] userOps,address aggregator,bytes signature)[] opsPerAggregator,address beneficiary)",
+]);
 
 const recoveryRateBuckets =
   globalThis.__rcWalletCounterfactualRecoveryRateBuckets ?? new Map();
 globalThis.__rcWalletCounterfactualRecoveryRateBuckets = recoveryRateBuckets;
 
 /* -------------------------------------------------------------------------- */
-/* HTTP security                                                               */
+/* HTTP security                                                              */
 /* -------------------------------------------------------------------------- */
 
 function configuredOrigins() {
@@ -107,11 +142,17 @@ function setCors(request, response) {
   response.setHeader("Access-Control-Allow-Headers", "content-type");
 }
 
-function json(request, response, status, body) {
-  setCors(request, response);
+function setSecurityHeaders(response) {
   response.setHeader("Cache-Control", "no-store, max-age=0");
   response.setHeader("Pragma", "no-cache");
   response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("X-Frame-Options", "DENY");
+}
+
+function json(request, response, status, body) {
+  setCors(request, response);
+  setSecurityHeaders(response);
   return response.status(status).json(body);
 }
 
@@ -120,6 +161,7 @@ function requestBodyTooLarge(request) {
     String(request?.headers?.["content-length"] ?? ""),
     10,
   );
+
   if (
     Number.isFinite(contentLength) &&
     contentLength > MAX_REQUEST_BODY_BYTES
@@ -150,9 +192,11 @@ function configuredRateLimit() {
     process.env.RC_RECOVERY_MAX_PER_MINUTE ?? "",
     10,
   );
+
   if (Number.isInteger(parsed) && parsed > 0) {
     return Math.min(parsed, MAX_RATE_LIMIT);
   }
+
   return DEFAULT_RATE_LIMIT;
 }
 
@@ -185,21 +229,27 @@ function recoveryRateLimit(request) {
       const stillActive = timestamps.filter(
         (timestamp) => now - timestamp < RATE_LIMIT_WINDOW_MS,
       );
+
       if (!stillActive.length) recoveryRateBuckets.delete(bucketKey);
       else recoveryRateBuckets.set(bucketKey, stillActive);
+
       if (recoveryRateBuckets.size <= 1_500) break;
     }
   }
 
-  return { allowed: true, remaining: Math.max(0, limit - active.length) };
+  return {
+    allowed: true,
+    remaining: Math.max(0, limit - active.length),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Normalization                                                               */
+/* Generic normalization                                                      */
 /* -------------------------------------------------------------------------- */
 
 function timeout(promise, milliseconds, label) {
   let timeoutId;
+
   const timeoutPromise = new Promise((_, reject) => {
     timeoutId = setTimeout(
       () => reject(new Error(`${label}: tiempo agotado`)),
@@ -216,8 +266,12 @@ function normalizeAddress(address, label = "address") {
   const value = String(address ?? "").trim();
   if (!ADDRESS_PATTERN.test(value)) throw new Error(`${label} invalida`);
 
-  // Never lowercase before getAddress: bad mixed-case EIP-55 must fail.
-  return ethers.getAddress(value);
+  // Never lowercase before getAddress: invalid mixed-case EIP-55 must fail.
+  try {
+    return ethers.getAddress(value);
+  } catch {
+    throw new Error(`${label} invalida o checksum EIP-55 incorrecto`);
+  }
 }
 
 function normalizeHash(hash, label = "hash") {
@@ -228,12 +282,15 @@ function normalizeHash(hash, label = "hash") {
 
 function normalizeHex(value, label, maxBytes = MAX_INITIALIZER_BYTES) {
   const normalized = String(value ?? "").trim();
+
   if (!ethers.isHexString(normalized)) {
     throw new Error(`${label} debe ser hex 0x...`);
   }
+
   if (ethers.getBytes(normalized).length > maxBytes) {
     throw new Error(`${label} demasiado grande`);
   }
+
   return normalized;
 }
 
@@ -265,6 +322,7 @@ function normalizeBlockTag(value, fallback) {
   if (!Number.isSafeInteger(numeric) || numeric < 0) {
     throw new Error("bloque invalido");
   }
+
   return numeric;
 }
 
@@ -276,20 +334,25 @@ function normalizePositiveInteger(value, fallback, maximum) {
 
 function sameAddress(left, right) {
   try {
-    return normalizeAddress(left) === normalizeAddress(right);
+    return (
+      normalizeAddress(left).toLowerCase() ===
+      normalizeAddress(right).toLowerCase()
+    );
   } catch {
     return false;
   }
 }
 
 function normalizedAddressSet(values) {
-  return [
-    ...new Set(
-      (Array.isArray(values) ? values : []).map((value) =>
-        normalizeAddress(value).toLowerCase(),
-      ),
-    ),
-  ].sort();
+  const result = new Set();
+
+  for (const value of Array.isArray(values) ? values : []) {
+    try {
+      result.add(normalizeAddress(value).toLowerCase());
+    } catch {}
+  }
+
+  return [...result].sort();
 }
 
 function sameAddressSet(left, right) {
@@ -302,8 +365,25 @@ function pushUnique(array, value) {
   if (value && !array.includes(value)) array.push(value);
 }
 
+function methodSupported(method) {
+  return typeof method === "string" && SAFE_SUPPORTED_CREATION_METHODS.has(method);
+}
+
+function methodAcceptedForLegacyDiagnostic(method) {
+  return (
+    methodSupported(method) ||
+    (typeof method === "string" && LEGACY_DIAGNOSTIC_METHODS.has(method))
+  );
+}
+
+function knownFactory(address) {
+  return SAFE_FACTORY_CANDIDATES.some((candidate) =>
+    sameAddress(candidate.factory, address),
+  );
+}
+
 /* -------------------------------------------------------------------------- */
-/* Public helpers                                                              */
+/* Public helpers                                                             */
 /* -------------------------------------------------------------------------- */
 
 export function summarizeMovementPlan(analysis = {}) {
@@ -342,27 +422,35 @@ export function normalizeManualSourceDeploymentInput(input = {}) {
     input.factoryAddress ??
     input.safeProxyFactory ??
     input.proxyFactory;
+
   const singleton =
     input.singleton ??
     input.masterCopy ??
     input.master_copy ??
     input.implementation;
+
   const initializer =
     input.initializer ?? input.setupData ?? input.setup_data ?? input.initData;
+
   const saltNonce = input.saltNonce ?? input.salt_nonce ?? input.salt;
+
   const method =
     input.deploymentMethod ??
     input.method ??
     input.creationMethod ??
     "createProxyWithNonce";
+
   const callback =
     input.callback ?? input.callbackAddress ?? input.callback_address ?? null;
+
   const proxyCreationCode =
     input.proxyCreationCode ?? input.sourceProxyCreationCode ?? null;
 
-  if (!SAFE_SUPPORTED_CREATION_METHODS.has(method)) {
+  if (!methodAcceptedForLegacyDiagnostic(method)) {
     throw new Error(`Metodo Safe no soportado: ${method}`);
   }
+
+  const legacyUnsupportedMethod = LEGACY_DIAGNOSTIC_METHODS.has(method);
 
   return {
     sourceUrl: "request.sourceDeployment",
@@ -378,15 +466,17 @@ export function normalizeManualSourceDeploymentInput(input = {}) {
     callback: callback
       ? normalizeAddress(callback, "sourceDeployment.callback")
       : null,
-    // Compatibility field only; on-chain source factory remains authoritative.
     proxyCreationCode: proxyCreationCode
       ? normalizeHex(proxyCreationCode, "sourceDeployment.proxyCreationCode")
       : null,
+    diagnosticOnly: true,
+    legacyUnsupportedMethod,
+    receiptVerified: false,
   };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Providers / source Safe                                                    */
+/* Networks / providers                                                       */
 /* -------------------------------------------------------------------------- */
 
 function networkByChainId(chainId) {
@@ -398,6 +488,7 @@ function networkByChainId(chainId) {
   const network = NETWORKS.find(
     (candidate) => Number(candidate.chainId) === numeric,
   );
+
   if (!network) throw new Error(`Red no configurada: ${chainId}`);
   return network;
 }
@@ -430,6 +521,7 @@ async function getProvider(network) {
       if (Number(providerNetwork.chainId) !== Number(network.chainId)) {
         throw new Error("chainId inesperado");
       }
+
       if (!Number.isSafeInteger(latestBlock) || latestBlock < 0) {
         throw new Error("latest block invalido");
       }
@@ -439,6 +531,7 @@ async function getProvider(network) {
       try {
         provider?.destroy?.();
       } catch {}
+
       errors.push(
         `${rpcUrl}: ${error instanceof Error ? error.message : "RPC fallido"}`,
       );
@@ -456,6 +549,10 @@ function addressFromStorageSlot(value) {
   return address === ethers.ZeroAddress ? ethers.ZeroAddress : address;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Source Safe inspection                                                     */
+/* -------------------------------------------------------------------------- */
+
 async function inspectSafe(provider, safeAddress) {
   const address = normalizeAddress(safeAddress, "smartAccountAddress");
   const code = await timeout(
@@ -463,6 +560,7 @@ async function inspectSafe(provider, safeAddress) {
     PROVIDER_TIMEOUT_MS,
     "account code",
   );
+
   const hasCode = Boolean(code && code !== "0x");
 
   const result = {
@@ -487,6 +585,7 @@ async function inspectSafe(provider, safeAddress) {
   }
 
   const safe = new ethers.Contract(address, SAFE_INTROSPECTION_ABI, provider);
+
   const results = await Promise.allSettled([
     timeout(safe.getOwners(), PROVIDER_TIMEOUT_MS, "Safe owners"),
     timeout(safe.getThreshold(), PROVIDER_TIMEOUT_MS, "Safe threshold"),
@@ -516,10 +615,11 @@ async function inspectSafe(provider, safeAddress) {
     const normalizedOwners = Array.from(owners.value ?? [])
       .filter((owner) => ethers.isAddress(owner))
       .map((owner) => ethers.getAddress(owner));
+
     const normalizedThreshold = Number(threshold.value);
 
     if (
-      normalizedOwners.length &&
+      normalizedOwners.length > 0 &&
       Number.isSafeInteger(normalizedThreshold) &&
       normalizedThreshold > 0 &&
       normalizedThreshold <= normalizedOwners.length
@@ -548,6 +648,7 @@ async function inspectSafe(provider, safeAddress) {
   if (singletonSlot.status === "fulfilled") {
     result.singleton = addressFromStorageSlot(singletonSlot.value);
   }
+
   if (fallbackSlot.status === "fulfilled") {
     result.fallbackHandler = addressFromStorageSlot(fallbackSlot.value);
   }
@@ -564,7 +665,7 @@ async function inspectSafe(provider, safeAddress) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Creation services / explorer                                               */
+/* HTTP / explorer helpers                                                    */
 /* -------------------------------------------------------------------------- */
 
 function explorerApiKey() {
@@ -602,7 +703,7 @@ async function fetchJson(url, label) {
     const response = await fetch(url, {
       headers: {
         accept: "application/json",
-        "user-agent": "RC-Wallet-External/1.0",
+        "user-agent": "RC-Wallet-External/RecoveryEngine",
       },
       signal: controller.signal,
     });
@@ -714,10 +815,7 @@ function normalizeCreationPayload(payload, sourceUrl) {
         ? initializer
         : null,
     saltNonce: normalizedSalt,
-    method:
-      typeof method === "string" && SAFE_SUPPORTED_CREATION_METHODS.has(method)
-        ? method
-        : null,
+    method: methodAcceptedForLegacyDiagnostic(method) ? method : null,
     callback:
       callback && ethers.isAddress(callback) ? ethers.getAddress(callback) : null,
     raw: data,
@@ -763,18 +861,121 @@ async function readCreationFromServices(chainId, safeAddress) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Creation transaction / logs                                                */
+/* SafeProxyFactory calldata                                                  */
 /* -------------------------------------------------------------------------- */
 
-function parseSafeFactoryTransaction(transaction) {
-  if (!transaction?.data || transaction.data === "0x") return null;
+function parseSafeFactoryCalldata(data) {
+  if (!data || data === "0x") return null;
+
+  let parsed;
+  try {
+    parsed = factoryInterface.parseTransaction({ data });
+  } catch {
+    return null;
+  }
+
+  if (!parsed) return null;
+  if (!methodSupported(parsed.name)) return null;
+
+  return {
+    method: parsed.name,
+    singleton: normalizeAddress(parsed.args[0], "singleton"),
+    initializer: normalizeHex(String(parsed.args[1]), "initializer"),
+    saltNonce: normalizeSaltNonce(parsed.args[2], "saltNonce"),
+    callback:
+      parsed.name === "createProxyWithCallback"
+        ? normalizeAddress(parsed.args[3], "callback")
+        : null,
+  };
+}
+
+function parseDirectSafeFactoryTransaction(transaction) {
+  if (!transaction?.to || !transaction?.data || transaction.data === "0x") {
+    return null;
+  }
+
   if (transaction.value !== undefined && BigInt(transaction.value) !== 0n) {
     return null;
   }
 
+  const parsed = parseSafeFactoryCalldata(transaction.data);
+  if (!parsed) return null;
+
+  return {
+    factory: normalizeAddress(transaction.to, "factory"),
+    ...parsed,
+    transport: "direct-safe-proxy-factory",
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* ERC-4337 transaction decoding                                              */
+/* -------------------------------------------------------------------------- */
+
+function entryPointDescriptor(address) {
+  if (!address || !ethers.isAddress(address)) return null;
+
+  return (
+    ERC4337_ENTRYPOINTS.find((entry) => sameAddress(entry.address, address)) ??
+    null
+  );
+}
+
+function entryPointInterfaceForVersion(version) {
+  if (version === "v0.7") return entryPointV07Interface;
+  if (version === "v0.6") return entryPointV06Interface;
+  return null;
+}
+
+function parseFactoryInitCode(initCode) {
+  const normalized = normalizeHex(initCode, "userOp.initCode");
+  const bytes = ethers.getBytes(normalized);
+
+  // factory(20 bytes) || factoryCalldata
+  if (bytes.length < 24) return null;
+
+  const factory = ethers.getAddress(ethers.hexlify(bytes.slice(0, 20)));
+  const factoryData = ethers.hexlify(bytes.slice(20));
+  const parsed = parseSafeFactoryCalldata(factoryData);
+  if (!parsed) return null;
+
+  return {
+    factory,
+    factoryData,
+    ...parsed,
+  };
+}
+
+function flattenEntryPointOperations(parsed) {
+  if (!parsed) return [];
+
+  if (parsed.name === "handleOps") {
+    return Array.from(parsed.args?.[0] ?? []);
+  }
+
+  if (parsed.name === "handleAggregatedOps") {
+    return Array.from(parsed.args?.[0] ?? []).flatMap((group) =>
+      Array.from(group?.userOps ?? group?.[0] ?? []),
+    );
+  }
+
+  return [];
+}
+
+function parseEntryPointTransaction(transaction, safeAddress) {
+  if (!transaction?.to || !transaction?.data || transaction.data === "0x") {
+    return null;
+  }
+
+  const descriptor = entryPointDescriptor(transaction.to);
+  if (!descriptor) return null;
+
+  const entryPointInterface = entryPointInterfaceForVersion(descriptor.version);
+  if (!entryPointInterface) return null;
+
   let parsed;
   try {
-    parsed = factoryInterface.parseTransaction({
+    parsed = entryPointInterface.parseTransaction({
       data: transaction.data,
       value: transaction.value ?? 0n,
     });
@@ -782,100 +983,135 @@ function parseSafeFactoryTransaction(transaction) {
     return null;
   }
 
-  if (!parsed || !SAFE_SUPPORTED_CREATION_METHODS.has(parsed.name)) return null;
+  if (!parsed) return null;
+  if (parsed.name !== "handleOps" && parsed.name !== "handleAggregatedOps") {
+    return null;
+  }
 
-  return {
-    method: parsed.name,
-    singleton: ethers.getAddress(parsed.args[0]),
-    initializer: String(parsed.args[1]),
-    saltNonce: normalizeSaltNonce(parsed.args[2]),
-    callback:
-      parsed.name === "createProxyWithCallback"
-        ? ethers.getAddress(parsed.args[3])
-        : null,
-  };
+  const expectedSafe = normalizeAddress(safeAddress, "smartAccountAddress");
+
+  for (const operation of flattenEntryPointOperations(parsed)) {
+    const sender = operation?.sender ?? operation?.[0] ?? null;
+    const initCode = operation?.initCode ?? operation?.[2] ?? "0x";
+
+    if (!sender || !ethers.isAddress(sender) || !sameAddress(sender, expectedSafe)) {
+      continue;
+    }
+
+    if (!initCode || initCode === "0x") continue;
+
+    let factoryCreation;
+    try {
+      factoryCreation = parseFactoryInitCode(initCode);
+    } catch {
+      continue;
+    }
+
+    if (!factoryCreation) continue;
+
+    return {
+      ...factoryCreation,
+      sender: expectedSafe,
+      entryPoint: normalizeAddress(transaction.to, "entryPoint"),
+      entryPointVersion: descriptor.version,
+      entryPointMethod: parsed.name,
+      transport: "erc-4337-entrypoint",
+      userOpInitCode: normalizeHex(initCode, "userOp.initCode"),
+    };
+  }
+
+  return null;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Limited debug_traceTransaction fallback                                    */
+/* -------------------------------------------------------------------------- */
+
+function traceNodeInput(node) {
+  return node?.input ?? node?.data ?? "0x";
+}
+
+function traceNodeTo(node) {
+  return node?.to ?? node?.action?.to ?? null;
+}
+
+function traceNodeCalls(node) {
+  if (Array.isArray(node?.calls)) return node.calls;
+  if (Array.isArray(node?.children)) return node.children;
+  return [];
+}
+
+function findSafeFactoryCallInTrace(trace) {
+  if (!trace || typeof trace !== "object") return null;
+
+  const stack = [trace];
+  let visited = 0;
+
+  while (stack.length && visited < MAX_TRACE_NODES) {
+    const node = stack.pop();
+    visited += 1;
+
+    const to = traceNodeTo(node);
+    const input = traceNodeInput(node);
+
+    if (to && ethers.isAddress(to) && knownFactory(to) && input && input !== "0x") {
+      const parsed = parseSafeFactoryCalldata(input);
+      if (parsed) {
+        return {
+          factory: normalizeAddress(to, "trace.factory"),
+          ...parsed,
+          transport: "debug-trace-safe-proxy-factory",
+        };
+      }
+    }
+
+    for (const child of traceNodeCalls(node)) stack.push(child);
+  }
+
+  return null;
+}
+
+async function parseCreationFromTrace(provider, transactionHash) {
+  try {
+    const trace = await timeout(
+      provider.send("debug_traceTransaction", [
+        transactionHash,
+        { tracer: "callTracer", timeout: "8s" },
+      ]),
+      TRACE_TIMEOUT_MS,
+      "debug_traceTransaction",
+    );
+
+    return findSafeFactoryCallInTrace(trace);
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* ProxyCreation receipt proof                                                */
+/* -------------------------------------------------------------------------- */
+
 function decodeCreationLog(log, proxy) {
-  const topic = log?.topics?.[0];
-  if (!SAFE_CREATION_EVENT_TOPICS.includes(topic)) return null;
+  if (log?.topics?.[0] !== SAFE_PROXY_CREATION_TOPIC) return null;
 
   try {
-    let decodedProxy = null;
-    let decodedData = [];
+    const expectedProxy = normalizeAddress(proxy, "smartAccountAddress");
+    if (!log.topics?.[1]) return null;
 
-    if (log.topics?.[1]) {
-      decodedProxy = ethers.getAddress(`0x${log.topics[1].slice(-40)}`);
+    const decodedProxy = ethers.getAddress(`0x${log.topics[1].slice(-40)}`);
+    if (!sameAddress(decodedProxy, expectedProxy)) return null;
+    if (!log.data || log.data === "0x") return null;
 
-      if (topic === SAFE_PROXY_CREATION_TOPIC) {
-        decodedData =
-          log.data && log.data !== "0x"
-            ? ethers.AbiCoder.defaultAbiCoder().decode(["address"], log.data)
-            : [];
-      } else if (topic === SAFE_PROXY_CREATION_L2_TOPIC) {
-        decodedData = ethers.AbiCoder.defaultAbiCoder().decode(
-          ["address", "bytes", "uint256"],
-          log.data,
-        );
-      } else {
-        decodedData = ethers.AbiCoder.defaultAbiCoder().decode(
-          ["address", "bytes", "uint256", "uint256"],
-          log.data,
-        );
-      }
-    } else if (log.data && log.data !== "0x") {
-      if (topic === SAFE_PROXY_CREATION_TOPIC) {
-        decodedData = ethers.AbiCoder.defaultAbiCoder().decode(
-          ["address", "address"],
-          log.data,
-        );
-      } else if (topic === SAFE_PROXY_CREATION_L2_TOPIC) {
-        decodedData = ethers.AbiCoder.defaultAbiCoder().decode(
-          ["address", "address", "bytes", "uint256"],
-          log.data,
-        );
-      } else {
-        decodedData = ethers.AbiCoder.defaultAbiCoder().decode(
-          ["address", "address", "bytes", "uint256", "uint256"],
-          log.data,
-        );
-      }
-      decodedProxy = ethers.getAddress(decodedData[0]);
-      decodedData = decodedData.slice(1);
-    }
-
-    if (!decodedProxy || !sameAddress(decodedProxy, proxy)) return null;
-
-    if (topic === SAFE_PROXY_CREATION_TOPIC) {
-      return {
-        proxy: decodedProxy,
-        singleton: decodedData[0] ? ethers.getAddress(decodedData[0]) : null,
-        initializer: null,
-        saltNonce: null,
-        method: null,
-        eventTopic: "ProxyCreation",
-      };
-    }
-
-    if (topic === SAFE_PROXY_CREATION_L2_TOPIC) {
-      return {
-        proxy: decodedProxy,
-        singleton: ethers.getAddress(decodedData[0]),
-        initializer: String(decodedData[1]),
-        saltNonce: normalizeSaltNonce(decodedData[2]),
-        method: "createProxyWithNonceL2",
-        eventTopic: "ProxyCreationL2",
-      };
-    }
+    const [singleton] = ethers.AbiCoder.defaultAbiCoder().decode(
+      ["address"],
+      log.data,
+    );
 
     return {
       proxy: decodedProxy,
-      singleton: ethers.getAddress(decodedData[0]),
-      initializer: String(decodedData[1]),
-      saltNonce: normalizeSaltNonce(decodedData[2]),
-      method: "createChainSpecificProxyWithNonceL2",
-      chainId: Number(decodedData[3]),
-      eventTopic: "ChainSpecificProxyCreationL2",
+      singleton: normalizeAddress(singleton, "ProxyCreation.singleton"),
+      eventTopic: "ProxyCreation",
     };
   } catch {
     return null;
@@ -913,69 +1149,55 @@ async function creationFromReceiptLogs({
     ),
   ]);
 
-  if (
-    !transaction ||
-    !transaction.to ||
-    !receipt ||
-    Number(receipt.status) !== 1
-  ) {
-    return null;
-  }
+  if (!transaction || !receipt || Number(receipt.status) !== 1) return null;
 
-  const parsed = parseSafeFactoryTransaction(transaction);
-  if (!parsed) return null;
+  let parsed = parseDirectSafeFactoryTransaction(transaction);
+  if (!parsed) parsed = parseEntryPointTransaction(transaction, normalizedSafe);
+  if (!parsed) parsed = await parseCreationFromTrace(provider, normalizedHash);
+  if (!parsed || !methodSupported(parsed.method)) return null;
 
-  const factory = normalizeAddress(transaction.to, "factory");
+  const factory = normalizeAddress(parsed.factory, "factory");
+  if (!knownFactory(factory)) return null;
 
   for (const log of receipt.logs ?? []) {
     if (!sameAddress(log.address, factory)) continue;
 
     const decoded = decodeCreationLog(log, normalizedSafe);
     if (!decoded) continue;
-
-    if (decoded.singleton && !sameAddress(decoded.singleton, parsed.singleton)) {
-      continue;
-    }
-    if (
-      decoded.initializer &&
-      decoded.initializer.toLowerCase() !== parsed.initializer.toLowerCase()
-    ) {
-      continue;
-    }
-    if (
-      decoded.saltNonce !== null &&
-      decoded.saltNonce !== undefined &&
-      decoded.saltNonce !== parsed.saltNonce
-    ) {
-      continue;
-    }
-    if (decoded.method && decoded.method !== parsed.method) continue;
+    if (!sameAddress(decoded.singleton, parsed.singleton)) continue;
 
     return {
-      sourceUrl: "request.transactionReceipt",
+      sourceUrl:
+        parsed.transport === "erc-4337-entrypoint"
+          ? "request.entryPointReceipt"
+          : parsed.transport === "debug-trace-safe-proxy-factory"
+            ? "request.tracedReceipt"
+            : "request.transactionReceipt",
       transactionHash: normalizedHash,
       factory,
-      ...parsed,
+      method: parsed.method,
+      singleton: parsed.singleton,
+      initializer: parsed.initializer,
+      saltNonce: parsed.saltNonce,
+      callback: parsed.callback ?? null,
+      transport: parsed.transport,
+      entryPoint: parsed.entryPoint ?? null,
+      entryPointVersion: parsed.entryPointVersion ?? null,
+      entryPointMethod: parsed.entryPointMethod ?? null,
       eventTopic: decoded.eventTopic,
       blockNumber: Number(log.blockNumber ?? receipt.blockNumber),
       receiptVerified: true,
+      diagnosticOnly: false,
     };
   }
 
   return null;
 }
 
-async function creationFromTransactionHash({
-  provider,
-  transactionHash,
-  safeAddress,
-}) {
+async function creationFromTransactionHash({ provider, transactionHash, safeAddress }) {
   return creationFromReceiptLogs({
     provider,
-    transactionHash: normalizeHash(
-      transactionHash,
-      "creationTransactionHash",
-    ),
+    transactionHash: normalizeHash(transactionHash, "creationTransactionHash"),
     safeAddress,
   });
 }
@@ -1027,78 +1249,79 @@ function creationFromMatchedLog({
     singleton: decoded?.singleton ?? null,
     eventTopic: decoded?.eventTopic ?? null,
     blockNumber: log.blockNumber,
+    receiptVerified: false,
+    diagnosticOnly: true,
   };
 
   if (factoryVersion) base.factoryVersion = factoryVersion;
-
-  if (decoded?.initializer && decoded?.saltNonce && decoded?.method) {
-    return {
-      ...base,
-      singleton: decoded.singleton,
-      initializer: decoded.initializer,
-      saltNonce: decoded.saltNonce,
-      method: decoded.method,
-    };
-  }
-
   return base;
 }
 
 async function readCreationFromExplorerGlobalLogs({
   chainId,
   safeAddress,
+  sourceProvider,
   fromBlock = 0,
   toBlock = "latest",
 }) {
   const normalizedSafe = normalizeAddress(safeAddress, "smartAccountAddress");
   const checked = [];
 
-  for (const eventTopic of SAFE_CREATION_EVENT_TOPICS) {
-    const url = etherscanApiUrl(chainId, {
-      module: "logs",
-      action: "getLogs",
+  const url = etherscanApiUrl(chainId, {
+    module: "logs",
+    action: "getLogs",
+    fromBlock,
+    toBlock,
+    topic0: SAFE_PROXY_CREATION_TOPIC,
+    topic1: ethers.zeroPadValue(normalizedSafe, 32),
+    topic0_1_opr: "and",
+  });
+
+  if (!url) return { creation: null, checked };
+
+  try {
+    const payload = await fetchJson(url, "Explorer global Safe creation logs");
+    const logs = explorerRows(payload).map(normalizeExplorerLog);
+
+    checked.push({
+      source: "explorer-global-logs",
+      eventTopic: SAFE_PROXY_CREATION_TOPIC,
       fromBlock,
       toBlock,
-      topic0: eventTopic,
-      topic1: ethers.zeroPadValue(normalizedSafe, 32),
-      topic0_1_opr: "and",
+      logs: logs.length,
     });
-    if (!url) return { creation: null, checked };
 
-    try {
-      const payload = await fetchJson(url, "Explorer global Safe creation logs");
-      const logs = explorerRows(payload).map(normalizeExplorerLog);
-      checked.push({
-        source: "explorer-global-logs",
-        eventTopic,
-        fromBlock,
-        toBlock,
-        logs: logs.length,
-      });
+    for (const log of logs) {
+      if (!proxyCreationLogMatches(log, normalizedSafe)) continue;
 
-      const match = logs.find((log) =>
-        proxyCreationLogMatches(log, normalizedSafe),
-      );
-      if (!match) continue;
+      if (log.transactionHash && sourceProvider) {
+        const verified = await creationFromTransactionHash({
+          provider: sourceProvider,
+          transactionHash: log.transactionHash,
+          safeAddress: normalizedSafe,
+        }).catch(() => null);
 
-      const decoded = decodeCreationLog(match, normalizedSafe);
+        if (verified) return { creation: verified, checked };
+      }
+
+      const decoded = decodeCreationLog(log, normalizedSafe);
       return {
         creation: creationFromMatchedLog({
-          log: match,
-          factory: match.address,
+          log,
+          factory: log.address,
           decoded,
           sourceUrl: "explorer-global-proxy-creation-logs",
         }),
         checked,
       };
-    } catch (error) {
-      checked.push({
-        source: "explorer-global-logs",
-        eventTopic,
-        error:
-          error instanceof Error ? error.message : "explorer global log failed",
-      });
     }
+  } catch (error) {
+    checked.push({
+      source: "explorer-global-logs",
+      eventTopic: SAFE_PROXY_CREATION_TOPIC,
+      error:
+        error instanceof Error ? error.message : "explorer global log failed",
+    });
   }
 
   return { creation: null, checked };
@@ -1107,6 +1330,7 @@ async function readCreationFromExplorerGlobalLogs({
 async function readCreationFromExplorerLogs({
   chainId,
   safeAddress,
+  sourceProvider,
   fromBlock = 0,
   toBlock = "latest",
 }) {
@@ -1116,41 +1340,50 @@ async function readCreationFromExplorerLogs({
   for (const candidate of SAFE_FACTORY_CANDIDATES) {
     const factory = normalizeAddress(candidate.factory, "factory");
 
-    for (const eventTopic of SAFE_CREATION_EVENT_TOPICS) {
-      const url = etherscanApiUrl(chainId, {
-        module: "logs",
-        action: "getLogs",
+    const url = etherscanApiUrl(chainId, {
+      module: "logs",
+      action: "getLogs",
+      fromBlock,
+      toBlock,
+      address: factory,
+      topic0: SAFE_PROXY_CREATION_TOPIC,
+      topic1: ethers.zeroPadValue(normalizedSafe, 32),
+      topic0_1_opr: "and",
+    });
+
+    if (!url) return { creation: null, checked };
+
+    try {
+      const payload = await fetchJson(url, "Explorer Safe creation logs");
+      const logs = explorerRows(payload).map(normalizeExplorerLog);
+
+      checked.push({
+        source: "explorer-logs",
+        factory,
+        version: candidate.version,
+        eventTopic: SAFE_PROXY_CREATION_TOPIC,
         fromBlock,
         toBlock,
-        address: factory,
-        topic0: eventTopic,
-        topic1: ethers.zeroPadValue(normalizedSafe, 32),
-        topic0_1_opr: "and",
+        logs: logs.length,
       });
-      if (!url) return { creation: null, checked };
 
-      try {
-        const payload = await fetchJson(url, "Explorer Safe creation logs");
-        const logs = explorerRows(payload).map(normalizeExplorerLog);
-        checked.push({
-          source: "explorer-logs",
-          factory,
-          version: candidate.version,
-          eventTopic,
-          fromBlock,
-          toBlock,
-          logs: logs.length,
-        });
+      for (const log of logs) {
+        if (!proxyCreationLogMatches(log, normalizedSafe)) continue;
 
-        const match = logs.find((log) =>
-          proxyCreationLogMatches(log, normalizedSafe),
-        );
-        if (!match) continue;
+        if (log.transactionHash && sourceProvider) {
+          const verified = await creationFromTransactionHash({
+            provider: sourceProvider,
+            transactionHash: log.transactionHash,
+            safeAddress: normalizedSafe,
+          }).catch(() => null);
 
-        const decoded = decodeCreationLog(match, normalizedSafe);
+          if (verified) return { creation: verified, checked };
+        }
+
+        const decoded = decodeCreationLog(log, normalizedSafe);
         return {
           creation: creationFromMatchedLog({
-            log: match,
+            log,
             factory,
             decoded,
             sourceUrl: "explorer-proxy-creation-logs",
@@ -1158,15 +1391,15 @@ async function readCreationFromExplorerLogs({
           }),
           checked,
         };
-      } catch (error) {
-        checked.push({
-          source: "explorer-logs",
-          factory,
-          version: candidate.version,
-          eventTopic,
-          error: error instanceof Error ? error.message : "explorer log failed",
-        });
       }
+    } catch (error) {
+      checked.push({
+        source: "explorer-logs",
+        factory,
+        version: candidate.version,
+        eventTopic: SAFE_PROXY_CREATION_TOPIC,
+        error: error instanceof Error ? error.message : "explorer log failed",
+      });
     }
   }
 
@@ -1179,6 +1412,7 @@ async function readCreationFromExplorerInternalTransactions({
 }) {
   const normalizedSafe = normalizeAddress(safeAddress, "smartAccountAddress");
   const checked = [];
+
   const url = etherscanApiUrl(chainId, {
     module: "account",
     action: "txlistinternal",
@@ -1193,10 +1427,7 @@ async function readCreationFromExplorerInternalTransactions({
   try {
     const payload = await fetchJson(url, "Explorer internal creation txs");
     const rows = explorerRows(payload);
-    checked.push({
-      source: "explorer-internal-transactions",
-      rows: rows.length,
-    });
+    checked.push({ source: "explorer-internal-transactions", rows: rows.length });
 
     const match = rows.find((row) => {
       const contractAddress = row.contractAddress ?? row.contract_address;
@@ -1213,10 +1444,6 @@ async function readCreationFromExplorerInternalTransactions({
         ? {
             sourceUrl: "explorer-internal-transactions",
             transactionHash: match.hash,
-            factory:
-              match.from && ethers.isAddress(match.from)
-                ? ethers.getAddress(match.from)
-                : null,
           }
         : null,
       checked,
@@ -1237,6 +1464,7 @@ async function readCreationFromExplorerNormalTransactions({
 }) {
   const normalizedSafe = normalizeAddress(safeAddress, "smartAccountAddress");
   const checked = [];
+
   const url = etherscanApiUrl(chainId, {
     module: "account",
     action: "txlist",
@@ -1253,27 +1481,13 @@ async function readCreationFromExplorerNormalTransactions({
     const rows = explorerRows(payload);
     checked.push({ source: "explorer-normal-transactions", rows: rows.length });
 
-    const match = rows.find((row) => {
-      const contractAddress = row.contractAddress ?? row.contract_address;
-      const to = row.to;
-      return (
-        HASH_PATTERN.test(row.hash ?? "") &&
-        ((contractAddress &&
-          ethers.isAddress(contractAddress) &&
-          sameAddress(contractAddress, normalizedSafe)) ||
-          !to)
-      );
-    });
+    const match = rows.find((row) => HASH_PATTERN.test(row.hash ?? ""));
 
     return {
       creation: match
         ? {
             sourceUrl: "explorer-normal-transactions",
             transactionHash: match.hash,
-            factory:
-              match.from && ethers.isAddress(match.from)
-                ? ethers.getAddress(match.from)
-                : null,
           }
         : null,
       checked,
@@ -1300,24 +1514,32 @@ async function readCreationFromExplorer({
   const logResult = await readCreationFromExplorerLogs({
     chainId,
     safeAddress,
+    sourceProvider,
     fromBlock,
     toBlock,
   });
   checked.push(...logResult.checked);
-  if (logResult.creation) return { creation: logResult.creation, checked };
+  if (logResult.creation?.receiptVerified) {
+    return { creation: logResult.creation, checked };
+  }
 
-  // Explicit opt-in only. Global search is NOT the default.
+  let diagnosticCandidate = logResult.creation ?? null;
+
   if (includeGlobalFactorySearch) {
-    const globalLogResult = await readCreationFromExplorerGlobalLogs({
+    const globalResult = await readCreationFromExplorerGlobalLogs({
       chainId,
       safeAddress,
+      sourceProvider,
       fromBlock,
       toBlock,
     });
-    checked.push(...globalLogResult.checked);
-    if (globalLogResult.creation) {
-      return { creation: globalLogResult.creation, checked };
+    checked.push(...globalResult.checked);
+
+    if (globalResult.creation?.receiptVerified) {
+      return { creation: globalResult.creation, checked };
     }
+
+    diagnosticCandidate = diagnosticCandidate ?? globalResult.creation;
   }
 
   const internalResult = await readCreationFromExplorerInternalTransactions({
@@ -1331,7 +1553,7 @@ async function readCreationFromExplorer({
       provider: sourceProvider,
       transactionHash: internalResult.creation.transactionHash,
       safeAddress,
-    });
+    }).catch(() => null);
     if (verified) return { creation: verified, checked };
   }
 
@@ -1346,15 +1568,15 @@ async function readCreationFromExplorer({
       provider: sourceProvider,
       transactionHash: normalResult.creation.transactionHash,
       safeAddress,
-    });
+    }).catch(() => null);
     if (verified) return { creation: verified, checked };
   }
 
-  return { creation: null, checked };
+  return { creation: diagnosticCandidate, checked };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Bounded RPC log search                                                     */
+/* Bounded RPC creation-log search                                            */
 /* -------------------------------------------------------------------------- */
 
 async function searchCreationLogs({
@@ -1366,11 +1588,15 @@ async function searchCreationLogs({
   logBatchSize = DEFAULT_LOG_BATCH_SIZE,
   includeUnindexedLogs = false,
 }) {
+  // ProxyCreation.proxy is indexed. Retained only for API compatibility.
+  void includeUnindexedLogs;
+
   const latestBlock = await timeout(
     provider.getBlockNumber(),
     PROVIDER_TIMEOUT_MS,
     "latest block",
   );
+
   const stopBlock = normalizeBlockTag(fromBlock, 0);
   const normalizedToBlock = normalizeBlockTag(toBlock, latestBlock);
   const startBlock =
@@ -1420,86 +1646,62 @@ async function searchCreationLogs({
       nextScan = rangeFromBlock > Number(stopBlock) ? rangeFromBlock - 1 : null;
       batches += 1;
 
-      const indexedModes = includeUnindexedLogs ? [true, false] : [true];
-      const logQueries = [];
-
-      for (const eventTopic of SAFE_CREATION_EVENT_TOPICS) {
-        for (const indexed of indexedModes) {
-          logQueries.push({
-            eventTopic,
-            indexed,
-            promise: timeout(
-              provider.getLogs({
-                address: factory,
-                topics: indexed
-                  ? [eventTopic, ethers.zeroPadValue(normalizedSafe, 32)]
-                  : [eventTopic],
-                fromBlock: rangeFromBlock,
-                toBlock: rangeToBlock,
-              }),
-              LOG_TIMEOUT_MS,
-              indexed ? "ProxyCreation indexed logs" : "ProxyCreation logs",
-            ),
-          });
-        }
-      }
-
-      const queryResults = await Promise.allSettled(
-        logQueries.map((query) => query.promise),
-      );
-
-      for (let index = 0; index < logQueries.length; index += 1) {
-        const { eventTopic, indexed } = logQueries[index];
-        const result = queryResults[index];
-
-        if (result.status === "rejected") {
-          checked.push({
-            factory,
-            version: candidate.version,
+      try {
+        const logs = await timeout(
+          provider.getLogs({
+            address: factory,
+            topics: [
+              SAFE_PROXY_CREATION_TOPIC,
+              ethers.zeroPadValue(normalizedSafe, 32),
+            ],
             fromBlock: rangeFromBlock,
             toBlock: rangeToBlock,
-            eventTopic,
-            indexed,
-            error:
-              result.reason instanceof Error
-                ? result.reason.message
-                : "log query failed",
-          });
-          continue;
-        }
+          }),
+          LOG_TIMEOUT_MS,
+          "ProxyCreation indexed logs",
+        );
 
         checked.push({
           factory,
           version: candidate.version,
           fromBlock: rangeFromBlock,
           toBlock: rangeToBlock,
-          eventTopic,
-          indexed,
-          logs: result.value.length,
+          eventTopic: SAFE_PROXY_CREATION_TOPIC,
+          indexed: true,
+          logs: logs.length,
         });
 
-        const match = result.value.find((log) =>
-          proxyCreationLogMatches(log, normalizedSafe),
-        );
-        if (!match) continue;
+        for (const log of logs) {
+          if (!proxyCreationLogMatches(log, normalizedSafe)) continue;
 
-        const verified = await creationFromTransactionHash({
-          provider,
-          transactionHash: match.transactionHash,
-          safeAddress: normalizedSafe,
-        });
+          const verified = await creationFromTransactionHash({
+            provider,
+            transactionHash: log.transactionHash,
+            safeAddress: normalizedSafe,
+          });
 
-        if (verified) {
-          return {
-            creation: {
-              ...verified,
-              sourceUrl: "rpc-proxy-creation-logs",
-              factoryVersion: candidate.version,
-            },
-            checked,
-            nextScan,
-          };
+          if (verified) {
+            return {
+              creation: {
+                ...verified,
+                sourceUrl: "rpc-proxy-creation-logs",
+                factoryVersion: candidate.version,
+              },
+              checked,
+              nextScan,
+            };
+          }
         }
+      } catch (error) {
+        checked.push({
+          factory,
+          version: candidate.version,
+          fromBlock: rangeFromBlock,
+          toBlock: rangeToBlock,
+          eventTopic: SAFE_PROXY_CREATION_TOPIC,
+          indexed: true,
+          error: error instanceof Error ? error.message : "log query failed",
+        });
       }
     }
   }
@@ -1520,6 +1722,7 @@ async function searchGlobalProxyCreationLogs({
     PROVIDER_TIMEOUT_MS,
     "latest block",
   );
+
   const stopBlock = normalizeBlockTag(fromBlock, 0);
   const normalizedToBlock = normalizeBlockTag(toBlock, latestBlock);
   const startBlock =
@@ -1555,12 +1758,11 @@ async function searchGlobalProxyCreationLogs({
     nextScan = rangeFromBlock > Number(stopBlock) ? rangeFromBlock - 1 : null;
     batches += 1;
 
-    const queries = SAFE_CREATION_EVENT_TOPICS.map((eventTopic) => ({
-      eventTopic,
-      promise: timeout(
+    try {
+      const logs = await timeout(
         provider.getLogs({
           topics: [
-            eventTopic,
+            SAFE_PROXY_CREATION_TOPIC,
             ethers.zeroPadValue(normalizedSafe, 32),
           ],
           fromBlock: rangeFromBlock,
@@ -1568,60 +1770,44 @@ async function searchGlobalProxyCreationLogs({
         }),
         LOG_TIMEOUT_MS,
         "Global ProxyCreation indexed logs",
-      ),
-    }));
-
-    const results = await Promise.allSettled(
-      queries.map((query) => query.promise),
-    );
-
-    for (let index = 0; index < queries.length; index += 1) {
-      const result = results[index];
-      const eventTopic = queries[index].eventTopic;
-
-      if (result.status === "rejected") {
-        checked.push({
-          source: "global-proxy-creation-logs",
-          fromBlock: rangeFromBlock,
-          toBlock: rangeToBlock,
-          eventTopic,
-          error:
-            result.reason instanceof Error
-              ? result.reason.message
-              : "global log failed",
-        });
-        continue;
-      }
+      );
 
       checked.push({
         source: "global-proxy-creation-logs",
         fromBlock: rangeFromBlock,
         toBlock: rangeToBlock,
-        eventTopic,
-        logs: result.value.length,
+        eventTopic: SAFE_PROXY_CREATION_TOPIC,
+        logs: logs.length,
       });
 
-      const match = result.value.find((log) =>
-        proxyCreationLogMatches(log, normalizedSafe),
-      );
-      if (!match) continue;
+      for (const log of logs) {
+        if (!proxyCreationLogMatches(log, normalizedSafe)) continue;
 
-      const verified = await creationFromTransactionHash({
-        provider,
-        transactionHash: match.transactionHash,
-        safeAddress: normalizedSafe,
-      });
+        const verified = await creationFromTransactionHash({
+          provider,
+          transactionHash: log.transactionHash,
+          safeAddress: normalizedSafe,
+        });
 
-      if (verified) {
-        return {
-          creation: {
-            ...verified,
-            sourceUrl: "rpc-global-proxy-creation-logs",
-          },
-          checked,
-          nextScan,
-        };
+        if (verified) {
+          return {
+            creation: {
+              ...verified,
+              sourceUrl: "rpc-global-proxy-creation-logs",
+            },
+            checked,
+            nextScan,
+          };
+        }
       }
+    } catch (error) {
+      checked.push({
+        source: "global-proxy-creation-logs",
+        fromBlock: rangeFromBlock,
+        toBlock: rangeToBlock,
+        eventTopic: SAFE_PROXY_CREATION_TOPIC,
+        error: error instanceof Error ? error.message : "global log failed",
+      });
     }
   }
 
@@ -1641,6 +1827,25 @@ async function searchCreationAroundTransaction({
     transactionHash,
     "relatedTransactionHash",
   );
+
+  const direct = await creationFromTransactionHash({
+    provider,
+    transactionHash: normalizedHash,
+    safeAddress,
+  });
+
+  if (direct) {
+    return {
+      creation: direct,
+      checked: [
+        {
+          source: "related-transaction-direct-proof",
+          transactionHash: normalizedHash,
+        },
+      ],
+    };
+  }
+
   const receipt = await timeout(
     provider.getTransactionReceipt(normalizedHash),
     PROVIDER_TIMEOUT_MS,
@@ -1659,27 +1864,26 @@ async function searchCreationAroundTransaction({
     PROVIDER_TIMEOUT_MS,
     "latest block",
   );
+
   const radius = normalizePositiveInteger(
     blockRadius,
     DEFAULT_RELATED_TX_BLOCK_RADIUS,
     MAX_RELATED_TX_BLOCK_RADIUS,
   );
-  const fromBlock = Math.max(0, Number(receipt.blockNumber) - radius);
-  const toBlock = Math.min(
-    latestBlock,
-    Number(receipt.blockNumber) + radius,
-  );
+
+  const scanFrom = Math.max(0, Number(receipt.blockNumber) - radius);
+  const scanTo = Math.min(latestBlock, Number(receipt.blockNumber) + radius);
 
   const result = await searchCreationLogs({
     provider,
     safeAddress,
-    fromBlock,
-    toBlock,
+    fromBlock: scanFrom,
+    toBlock: scanTo,
     maxLogBatches: Math.max(
       1,
       Math.min(
         MAX_LOG_BATCHES,
-        Math.ceil((toBlock - fromBlock + 1) / DEFAULT_LOG_BATCH_SIZE),
+        Math.ceil((scanTo - scanFrom + 1) / DEFAULT_LOG_BATCH_SIZE),
       ),
     ),
     logBatchSize: DEFAULT_LOG_BATCH_SIZE,
@@ -1693,8 +1897,8 @@ async function searchCreationAroundTransaction({
         source: "related-transaction-block-window",
         transactionHash: normalizedHash,
         blockNumber: Number(receipt.blockNumber),
-        fromBlock,
-        toBlock,
+        fromBlock: scanFrom,
+        toBlock: scanTo,
       },
       ...result.checked,
     ],
@@ -1702,14 +1906,10 @@ async function searchCreationAroundTransaction({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Source discovery                                                           */
+/* Source creation discovery                                                  */
 /* -------------------------------------------------------------------------- */
 
-async function hydrateCreation({
-  sourceProvider,
-  safeAddress,
-  creation,
-}) {
+async function hydrateCreation({ sourceProvider, safeAddress, creation }) {
   if (!creation) return null;
 
   if (creation.transactionHash) {
@@ -1717,7 +1917,7 @@ async function hydrateCreation({
       provider: sourceProvider,
       transactionHash: creation.transactionHash,
       safeAddress,
-    });
+    }).catch(() => null);
 
     if (verified) {
       return {
@@ -1726,11 +1926,11 @@ async function hydrateCreation({
         sourceUrl: verified.sourceUrl ?? creation.sourceUrl,
         serviceSourceUrl: creation.sourceUrl ?? null,
         receiptVerified: true,
+        diagnosticOnly: false,
       };
     }
   }
 
-  // Manual deterministic proof is allowed without tx hash, but must be complete.
   if (
     creation.factory &&
     creation.singleton &&
@@ -1739,7 +1939,11 @@ async function hydrateCreation({
     creation.saltNonce !== undefined &&
     creation.method
   ) {
-    return { ...creation, receiptVerified: Boolean(creation.receiptVerified) };
+    return {
+      ...creation,
+      receiptVerified: false,
+      diagnosticOnly: true,
+    };
   }
 
   return null;
@@ -1770,24 +1974,24 @@ async function discoverSourceCreation({
     creationTransactionHashLookup: null,
     nextScan: null,
     globalSearchEnabled: Boolean(includeGlobalFactorySearch),
+    supportsEntryPointV07: true,
+    supportsEntryPointV06: true,
+    supportsDebugTraceFallback: true,
   };
 
   let creation = null;
+  let diagnosticCandidate = null;
 
-  if (manualSourceDeployment) {
-    creation = normalizeManualSourceDeploymentInput(manualSourceDeployment);
-    evidence.manualSourceDeployment = "accepted";
-  }
-
-  if (!creation && creationTransactionHash) {
+  if (creationTransactionHash) {
     creation = await creationFromTransactionHash({
       provider: sourceProvider,
       transactionHash: creationTransactionHash,
       safeAddress,
     });
+
     evidence.creationTransactionHashLookup = creation
-      ? "matched"
-      : "transaction did not expose a verified Safe creation event";
+      ? "receipt-verified"
+      : "transaction did not prove Safe creation";
   }
 
   if (!creation) {
@@ -1796,11 +2000,15 @@ async function discoverSourceCreation({
       safeAddress,
     );
     evidence.creationServices = serviceResult.errors;
-    creation = await hydrateCreation({
+
+    const hydrated = await hydrateCreation({
       sourceProvider,
       safeAddress,
       creation: serviceResult.creation,
     });
+
+    if (hydrated?.receiptVerified) creation = hydrated;
+    else diagnosticCandidate = diagnosticCandidate ?? hydrated;
   }
 
   if (!creation) {
@@ -1810,27 +2018,18 @@ async function discoverSourceCreation({
       sourceProvider,
       fromBlock,
       toBlock,
-      // Global explorer search is intentionally disabled here.
       includeGlobalFactorySearch: false,
     });
     evidence.explorerSearch = explorerResult.checked;
-    creation = await hydrateCreation({
+
+    const hydrated = await hydrateCreation({
       sourceProvider,
       safeAddress,
       creation: explorerResult.creation,
     });
-  }
 
-  if (!creation && creationTransactionHash) {
-    const nearbyResult = await searchCreationAroundTransaction({
-      provider: sourceProvider,
-      safeAddress,
-      transactionHash: creationTransactionHash,
-      blockRadius: relatedBlockRadius,
-      includeUnindexedLogs,
-    });
-    evidence.relatedTransactionBlockSearch = nearbyResult.checked;
-    creation = nearbyResult.creation;
+    if (hydrated?.receiptVerified) creation = hydrated;
+    else diagnosticCandidate = diagnosticCandidate ?? hydrated;
   }
 
   if (!creation) {
@@ -1845,11 +2044,11 @@ async function discoverSourceCreation({
     });
     evidence.logSearch = logResult.checked;
     evidence.nextScan = logResult.nextScan;
-    creation = logResult.creation;
+    if (logResult.creation) creation = logResult.creation;
   }
 
   if (!creation && includeGlobalFactorySearch) {
-    const globalLogResult = await searchGlobalProxyCreationLogs({
+    const globalResult = await searchGlobalProxyCreationLogs({
       provider: sourceProvider,
       safeAddress,
       fromBlock,
@@ -1864,22 +2063,37 @@ async function discoverSourceCreation({
       ),
       logBatchSize: GLOBAL_LOG_BATCH_SIZE,
     });
-    evidence.globalLogSearch = globalLogResult.checked;
-    evidence.nextScan = globalLogResult.nextScan ?? evidence.nextScan;
-    creation = globalLogResult.creation;
+    evidence.globalLogSearch = globalResult.checked;
+    evidence.nextScan = globalResult.nextScan ?? evidence.nextScan;
+    if (globalResult.creation) creation = globalResult.creation;
   }
 
-  creation = await hydrateCreation({
-    sourceProvider,
-    safeAddress,
-    creation,
-  });
+  if (!creation && creationTransactionHash) {
+    const nearbyResult = await searchCreationAroundTransaction({
+      provider: sourceProvider,
+      safeAddress,
+      transactionHash: creationTransactionHash,
+      blockRadius: relatedBlockRadius,
+      includeUnindexedLogs,
+    });
+    evidence.relatedTransactionBlockSearch = nearbyResult.checked;
+    if (nearbyResult.creation) creation = nearbyResult.creation;
+  }
 
-  return { creation, evidence };
+  if (!creation && manualSourceDeployment) {
+    const manual = normalizeManualSourceDeploymentInput(manualSourceDeployment);
+    evidence.manualSourceDeployment = "diagnostic-only";
+    diagnosticCandidate = diagnosticCandidate ?? manual;
+  }
+
+  return {
+    creation: creation ?? diagnosticCandidate,
+    evidence,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Independent source/target bytecode proof                                   */
+/* Independent source/target contract proof                                   */
 /* -------------------------------------------------------------------------- */
 
 async function readContractCodeState(provider, address, label) {
@@ -1900,11 +2114,7 @@ async function readContractCodeState(provider, address, label) {
 }
 
 async function readFactoryProxyCreationCode(provider, factoryAddress, label) {
-  const codeState = await readContractCodeState(
-    provider,
-    factoryAddress,
-    label,
-  );
+  const codeState = await readContractCodeState(provider, factoryAddress, label);
 
   if (!codeState.hasCode) {
     return {
@@ -1919,6 +2129,7 @@ async function readFactoryProxyCreationCode(provider, factoryAddress, label) {
     SAFE_PROXY_FACTORY_ABI,
     provider,
   );
+
   const proxyCreationCode = normalizeHex(
     await timeout(
       factory.proxyCreationCode(),
@@ -1936,14 +2147,16 @@ async function readFactoryProxyCreationCode(provider, factoryAddress, label) {
 }
 
 async function readDependencyCode(provider, addresses) {
-  const unique = [
-    ...new Set(
-      (addresses ?? [])
-        .filter(Boolean)
-        .map((address) => normalizeAddress(address))
-        .filter((address) => address !== ethers.ZeroAddress),
-    ),
-  ];
+  const unique = [];
+
+  for (const rawAddress of addresses ?? []) {
+    if (!rawAddress) continue;
+    const address = normalizeAddress(rawAddress);
+    if (address === ethers.ZeroAddress) continue;
+    if (!unique.some((existing) => sameAddress(existing, address))) {
+      unique.push(address);
+    }
+  }
 
   const rows = await Promise.all(
     unique.map(async (address) => {
@@ -1952,20 +2165,14 @@ async function readDependencyCode(provider, addresses) {
         address,
         `dependency ${address}`,
       );
-      return [
-        address,
-        { hasCode: state.hasCode, codeHash: state.codeHash },
-      ];
+      return [address, { hasCode: state.hasCode, codeHash: state.codeHash }];
     }),
   );
 
   return Object.fromEntries(rows);
 }
 
-function validateInitializerAgainstSource({
-  initializer,
-  sourceSafeState,
-}) {
+function validateInitializerAgainstSource({ initializer, sourceSafeState }) {
   const blockers = [];
   const warnings = [];
 
@@ -1989,9 +2196,7 @@ function validateInitializerAgainstSource({
   }
 
   if (!sameAddressSet(decoded.owners, sourceSafeState.owners)) {
-    blockers.push(
-      "initializer owners do not match the current source Safe owners",
-    );
+    blockers.push("initializer owners do not match the current source Safe owners");
   }
 
   if (BigInt(decoded.threshold) !== BigInt(sourceSafeState.threshold)) {
@@ -2016,10 +2221,7 @@ function validateInitializerAgainstSource({
     );
   }
 
-  if (
-    decoded.setupTo === ethers.ZeroAddress &&
-    decoded.setupData !== "0x"
-  ) {
+  if (decoded.setupTo === ethers.ZeroAddress && decoded.setupData !== "0x") {
     blockers.push("initializer setupTo is zero but setupData is non-empty");
   }
 
@@ -2035,6 +2237,7 @@ function validateInitializerAgainstSource({
 
   if (decoded.moduleSetup?.recognized && sourceSafeState.modulesReadable) {
     const liveModules = normalizedAddressSet(sourceSafeState.modules);
+
     for (const module of decoded.moduleSetup.modules) {
       if (!liveModules.includes(normalizeAddress(module).toLowerCase())) {
         blockers.push(
@@ -2066,26 +2269,25 @@ async function deploymentFromCreation({
   creation,
 }) {
   const expectedSafe = normalizeAddress(safeAddress, "smartAccountAddress");
+  if (!creation) return null;
+
   let authoritative = creation;
 
-  if (creation?.transactionHash) {
+  if (creation.transactionHash) {
     const verified = await creationFromTransactionHash({
       provider: sourceProvider,
       transactionHash: creation.transactionHash,
       safeAddress: expectedSafe,
     });
 
-    if (!verified) {
-      throw new Error(
-        "creationTransactionHash does not prove creation of the requested Safe",
-      );
+    if (verified) {
+      authoritative = {
+        ...creation,
+        ...verified,
+        receiptVerified: true,
+        diagnosticOnly: false,
+      };
     }
-
-    authoritative = {
-      ...creation,
-      ...verified,
-      receiptVerified: true,
-    };
   }
 
   if (
@@ -2099,11 +2301,19 @@ async function deploymentFromCreation({
     return null;
   }
 
-  if (!SAFE_SUPPORTED_CREATION_METHODS.has(authoritative.method)) {
-    throw new Error(`Metodo Safe no soportado: ${authoritative.method}`);
+  if (!methodSupported(authoritative.method)) {
+    throw new Error(
+      `Metodo Safe no soportado por SafeProxyFactory v1.4.1: ${authoritative.method}`,
+    );
   }
 
   const factory = normalizeAddress(authoritative.factory, "factory");
+  if (!knownFactory(factory)) {
+    throw new Error(
+      "Source creation factory is not in the audited Safe factory catalog",
+    );
+  }
+
   const singleton = normalizeAddress(authoritative.singleton, "singleton");
   const initializer = normalizeHex(authoritative.initializer, "initializer");
   const saltNonce = normalizeSaltNonce(authoritative.saltNonce, "saltNonce");
@@ -2115,23 +2325,18 @@ async function deploymentFromCreation({
     throw new Error("createProxyWithCallback requires verified callback");
   }
 
-  const [
-    sourceFactory,
-    targetFactory,
-    sourceSingleton,
-    targetSingleton,
-  ] = await Promise.all([
-    readFactoryProxyCreationCode(sourceProvider, factory, "source factory"),
-    readFactoryProxyCreationCode(targetProvider, factory, "target factory"),
-    readContractCodeState(sourceProvider, singleton, "source singleton"),
-    readContractCodeState(targetProvider, singleton, "target singleton"),
-  ]);
+  const [sourceFactory, targetFactory, sourceSingleton, targetSingleton] =
+    await Promise.all([
+      readFactoryProxyCreationCode(sourceProvider, factory, "source factory"),
+      readFactoryProxyCreationCode(targetProvider, factory, "target factory"),
+      readContractCodeState(sourceProvider, singleton, "source singleton"),
+      readContractCodeState(targetProvider, singleton, "target singleton"),
+    ]);
 
   if (!sourceFactory.hasCode || !sourceFactory.proxyCreationCode) {
-    throw new Error(
-      "Source Safe factory has no usable code/proxyCreationCode",
-    );
+    throw new Error("Source Safe factory has no usable code/proxyCreationCode");
   }
+
   if (!sourceSingleton.hasCode) {
     throw new Error("Source Safe singleton has no code");
   }
@@ -2144,6 +2349,7 @@ async function deploymentFromCreation({
     );
     manualProxyCreationCodeMatches =
       ethers.keccak256(supplied) === sourceFactory.proxyCreationCodeHash;
+
     if (!manualProxyCreationCodeMatches) {
       throw new Error(
         "Supplied proxyCreationCode does not match source factory proxyCreationCode()",
@@ -2153,15 +2359,19 @@ async function deploymentFromCreation({
 
   const sourceProxyCreationCode = sourceFactory.proxyCreationCode;
   const targetProxyCreationCode = targetFactory.proxyCreationCode;
+
   const proxyCreationCodeMatches =
     Boolean(targetProxyCreationCode) &&
     sourceFactory.proxyCreationCodeHash === targetFactory.proxyCreationCodeHash;
+
   const factoryRuntimeCodeMatches =
     Boolean(sourceFactory.codeHash && targetFactory.codeHash) &&
     sourceFactory.codeHash === targetFactory.codeHash;
+
   const singletonRuntimeCodeMatches =
     Boolean(sourceSingleton.codeHash && targetSingleton.codeHash) &&
     sourceSingleton.codeHash === targetSingleton.codeHash;
+
   const sourceSingletonMatchesSafe =
     Boolean(sourceSafeState?.singleton) &&
     sameAddress(sourceSafeState.singleton, singleton);
@@ -2223,7 +2433,7 @@ async function deploymentFromCreation({
     method: authoritative.method,
     callback,
 
-    // Engine compatibility. SOURCE code remains authoritative.
+    // Engine compatibility proxyCreationCode must remain source-derived.
     proxyCreationCode: sourceProxyCreationCode,
     sourceProxyCreationCode,
     targetProxyCreationCode,
@@ -2253,7 +2463,12 @@ async function deploymentFromCreation({
 
     sourceTransactionHash: authoritative.transactionHash ?? null,
     sourceUrl: authoritative.sourceUrl ?? null,
-    receiptVerified: Boolean(authoritative.receiptVerified),
+    receiptVerified: authoritative.receiptVerified === true,
+    diagnosticOnly: authoritative.receiptVerified !== true,
+    transport: authoritative.transport ?? null,
+    entryPoint: authoritative.entryPoint ?? null,
+    entryPointVersion: authoritative.entryPointVersion ?? null,
+    entryPointMethod: authoritative.entryPointMethod ?? null,
     manualProxyCreationCodeMatches,
     sourceChainId: Number(sourceChainId),
     targetChainId: Number(targetChainId),
@@ -2308,9 +2523,10 @@ async function buildSourceDeployment({
     evidence: discovery.evidence,
   };
 }
+void buildSourceDeployment;
 
 /* -------------------------------------------------------------------------- */
-/* Harden engine output                                                       */
+/* Provenance gate                                                            */
 /* -------------------------------------------------------------------------- */
 
 function provenanceBlockersForDeployment(sourceDeployment) {
@@ -2324,37 +2540,48 @@ function provenanceBlockersForDeployment(sourceDeployment) {
     };
   }
 
+  if (sourceDeployment.receiptVerified !== true) {
+    blockers.push("source creation transaction/receipt proof is not verified");
+  }
+
   if (sourceDeployment.sourcePrediction?.matches !== true) {
     blockers.push(
       "source CREATE2 prediction does not reproduce the existing Safe",
     );
   }
+
   if (sourceDeployment.targetPrediction?.matches !== true) {
     blockers.push(
       "target CREATE2 prediction does not reproduce the address containing the funds",
     );
   }
+
   if (sourceDeployment.targetFactoryHasCode !== true) {
     blockers.push("target Safe factory has no code");
   }
+
   if (sourceDeployment.targetSingletonHasCode !== true) {
     blockers.push("target Safe singleton has no code");
   }
+
   if (sourceDeployment.proxyCreationCodeMatches !== true) {
     blockers.push(
       "source and target factory proxyCreationCode differ or could not be verified",
     );
   }
+
   if (sourceDeployment.factoryRuntimeCodeMatches !== true) {
     blockers.push(
       "source and target Safe factory runtime bytecode hashes do not match",
     );
   }
+
   if (sourceDeployment.singletonRuntimeCodeMatches !== true) {
     blockers.push(
       "source and target Safe singleton runtime bytecode hashes do not match",
     );
   }
+
   if (sourceDeployment.sourceSingletonMatchesSafe !== true) {
     blockers.push(
       "deployment singleton does not match the singleton used by the source Safe",
@@ -2379,18 +2606,9 @@ function provenanceBlockersForDeployment(sourceDeployment) {
     );
   }
 
-  if (
-    sourceDeployment.sourceTransactionHash &&
-    sourceDeployment.receiptVerified !== true
-  ) {
+  if (sourceDeployment.diagnosticOnly) {
     blockers.push(
-      "source creation transaction exists but receipt/event proof is not verified",
-    );
-  }
-
-  if (!sourceDeployment.sourceTransactionHash) {
-    warnings.push(
-      "No source creation transaction hash attached; deterministic source CREATE2 proof remains mandatory.",
+      "manual/unverified deployment parameters are diagnostic-only and cannot authorize mainnet recovery",
     );
   }
 
@@ -2415,10 +2633,10 @@ function hardenAnalysis(analysis, sourceDeployment) {
     warnings,
     deployment: {
       ...(analysis.deployment ?? {}),
-      // Fail closed: never expose a deployment transaction when provenance fails.
       deployTransaction: recoveryPossible
         ? analysis.deployment?.deployTransaction ?? null
         : null,
+      receiptVerified: sourceDeployment?.receiptVerified === true,
       mainnetBroadcastPrepared: false,
       forkSimulationRequired: true,
       manualApprovalRequired: true,
@@ -2434,6 +2652,8 @@ function hardenAnalysis(analysis, sourceDeployment) {
         sourceDeployment?.singletonRuntimeCodeMatches ?? false,
       targetDependenciesHaveCode:
         sourceDeployment?.targetDependenciesHaveCode ?? false,
+      sourceCreationTransport: sourceDeployment?.transport ?? null,
+      entryPointVersion: sourceDeployment?.entryPointVersion ?? null,
     },
   };
 }
@@ -2493,6 +2713,11 @@ async function analyzeTarget({
     evidence: {
       ...evidence,
       provenance: {
+        sourceTransactionHash: sourceDeployment?.sourceTransactionHash ?? null,
+        receiptVerified: sourceDeployment?.receiptVerified ?? false,
+        transport: sourceDeployment?.transport ?? null,
+        entryPoint: sourceDeployment?.entryPoint ?? null,
+        entryPointVersion: sourceDeployment?.entryPointVersion ?? null,
         sourceProxyCreationCodeHash:
           sourceDeployment?.sourceProxyCreationCodeHash ?? null,
         targetProxyCreationCodeHash:
@@ -2513,7 +2738,6 @@ async function analyzeTarget({
           sourceDeployment?.sourceSingletonMatchesSafe ?? null,
         targetDependenciesHaveCode:
           sourceDeployment?.targetDependenciesHaveCode ?? null,
-        receiptVerified: sourceDeployment?.receiptVerified ?? null,
       },
     },
   };
@@ -2563,9 +2787,12 @@ function normalizePlannedTransfers(value) {
   if (!Array.isArray(value)) {
     throw new Error("plannedTransfers debe ser array");
   }
-  if (value.length > 20) {
-    throw new Error("plannedTransfers excede el maximo de 20 acciones");
+  if (value.length > MAX_PLANNED_TRANSFERS) {
+    throw new Error(
+      `plannedTransfers excede el maximo de ${MAX_PLANNED_TRANSFERS} acciones`,
+    );
   }
+
   assertNoSecrets(value);
   return value;
 }
@@ -2584,6 +2811,7 @@ export default async function handler(request, response) {
   }
 
   setCors(request, response);
+  setSecurityHeaders(response);
 
   if (request.method === "OPTIONS") {
     return response.status(204).end();
@@ -2631,9 +2859,11 @@ export default async function handler(request, response) {
       body.smartAccountAddress,
       "smartAccountAddress",
     );
+
     const connectedOwnerAddress = body.connectedOwnerAddress
       ? normalizeAddress(body.connectedOwnerAddress, "connectedOwnerAddress")
       : null;
+
     const plannedTransfers = normalizePlannedTransfers(body.plannedTransfers);
 
     const sourceNetwork = networkByChainId(sourceChainId);
@@ -2647,24 +2877,23 @@ export default async function handler(request, response) {
     );
 
     const includeUnindexedLogs = body.includeUnindexedLogs === true;
-    const includeGlobalFactorySearch =
-      body.includeGlobalFactorySearch === true;
+    const includeGlobalFactorySearch = body.includeGlobalFactorySearch === true;
 
     const maxLogBatches = normalizePositiveInteger(
       body.maxLogBatches,
       DEFAULT_MAX_LOG_BATCHES,
       MAX_LOG_BATCHES,
     );
+
     const logBatchSize = normalizePositiveInteger(
       body.logBatchSize,
       DEFAULT_LOG_BATCH_SIZE,
       MAX_LOG_BATCH_SIZE,
     );
+
     const fromBlock = normalizeBlockTag(body.fromBlock, 0);
-    const toBlock = normalizeBlockTag(
-      body.scanCursor ?? body.toBlock,
-      "latest",
-    );
+    const toBlock = normalizeBlockTag(body.scanCursor ?? body.toBlock, "latest");
+
     const relatedBlockRadius = normalizePositiveInteger(
       body.relatedBlockRadius,
       DEFAULT_RELATED_TX_BLOCK_RADIUS,
@@ -2673,11 +2902,11 @@ export default async function handler(request, response) {
 
     const creationTransactionHash =
       body.creationTransactionHash ?? body.relatedTransactionHash ?? null;
+
     if (creationTransactionHash) {
       normalizeHash(creationTransactionHash, "creationTransactionHash");
     }
 
-    // Discover source creation exactly once, then reuse it for each target.
     const discovery = await discoverSourceCreation({
       sourceProvider,
       sourceChainId,
@@ -2783,13 +3012,26 @@ export default async function handler(request, response) {
         found: Boolean(discovery.creation),
         sourceUrl: discovery.creation?.sourceUrl ?? null,
         transactionHash: discovery.creation?.transactionHash ?? null,
-        receiptVerified: discovery.creation?.receiptVerified ?? false,
+        receiptVerified: discovery.creation?.receiptVerified === true,
+        diagnosticOnly: discovery.creation?.diagnosticOnly === true,
+        transport: discovery.creation?.transport ?? null,
+        entryPoint: discovery.creation?.entryPoint ?? null,
+        entryPointVersion: discovery.creation?.entryPointVersion ?? null,
+        method: discovery.creation?.method ?? null,
+        factory: discovery.creation?.factory ?? null,
+        singleton: discovery.creation?.singleton ?? null,
+        saltNonce: discovery.creation?.saltNonce ?? null,
       },
       targets,
       safety: {
         noPrivateKeys: true,
         noMainnetBroadcast: true,
         deployOnlyIfPredictedAddressMatches: true,
+        verifiedCreationReceiptRequired: true,
+        supportsDirectFactoryCreation: true,
+        supportsEntryPointV07Creation: true,
+        supportsEntryPointV06Creation: true,
+        supportsDebugTraceFallback: true,
         sourceAndTargetProxyCreationCodeCompared: true,
         factoryRuntimeCodeCompared: true,
         singletonRuntimeCodeCompared: true,
@@ -2807,9 +3049,7 @@ export default async function handler(request, response) {
       ok: false,
       route: "counterfactual-safe-recovery",
       error:
-        error instanceof Error
-          ? error.message
-          : "No se pudo analizar recovery",
+        error instanceof Error ? error.message : "No se pudo analizar recovery",
     });
   } finally {
     try {
