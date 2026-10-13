@@ -27,7 +27,7 @@ jobs:
       - name: Existing functional tests
         run: pnpm test:wallet
       - name: RPC identity and secret-handling regressions
-        run: node --test tests/verified-rpc-and-keys.test.mjs
+        run: node --test tests/verified-rpc-and-keys.test.mjs tests/safe-propose-limits.test.mjs
       - name: Recovery safety tests
         run: pnpm lint
       - name: Import/type checks
