@@ -2728,6 +2728,7 @@ export default function App() {
       gasPayerConnectionRef.current?.cleanup?.();
       qrScanActiveRef.current = false;
       stopQrScannerStream(qrStreamRef.current);
+      privateKeyRef.current = "";
     };
   }, []);
 
@@ -2966,13 +2967,18 @@ export default function App() {
         (asset) => asset.chainId !== WORLD_CHAIN_ID,
       ).length;
 
+      const incomplete = Object.values(result.networks).filter(
+        (state) => state.status !== "online",
+      ).length;
       showStatus(
-        result.assets.length
-          ? externalAssetCount
-            ? `Escaneo completado: ${externalAssetCount} activo(s) fuera de World Chain listos para revisar.`
-            : `Escaneo completado: ${result.assets.length} activo(s) en World Chain. No se detectaron fondos externos configurados.`
-          : "No se encontraron balances entre los activos configurados.",
-        "success",
+        incomplete
+          ? `Escaneo incompleto en ${incomplete} red(es). Los contratos no consultados NO equivalen a saldo cero.`
+          : result.assets.length
+            ? externalAssetCount
+              ? `Escaneo completado: ${externalAssetCount} activo(s) externos detectados para revisar.`
+              : `Escaneo completado: ${result.assets.length} activo(s) en World Chain.`
+            : "No se encontraron balances entre los activos configurados.",
+        incomplete ? "warning" : "success",
       );
     } catch (error) {
       console.error("[SCAN]", error);
@@ -5501,10 +5507,13 @@ export default function App() {
                             ? "dot--green"
                             : state?.status === "offline"
                               ? "dot--red"
-                              : ""
+                              : "dot--amber"
                         }`}
                       />
                       <span>{network.name}</span>
+                      {state?.status === "partial" && (
+                        <small title={state.error ?? "Error de lectura ERC-20"}>lectura parcial</small>
+                      )}
                       {state?.accountKind === "contract" && (
                         <small>contrato</small>
                       )}
