@@ -1,2 +1,11 @@
 allowBuilds:
   esbuild: true
+
+# pnpm 11 reads dependency overrides from this file, not package.json.
+# Scoped to vulnerable major lines to preserve unrelated dependencies.
+overrides:
+  "ws@8": "8.22.0"
+  "nanoid@3": "3.3.18"
+  "postcss@8": "8.5.18"
+  "source-map-js@1": "1.2.2"
+  "browserslist@4": "4.28.7"
