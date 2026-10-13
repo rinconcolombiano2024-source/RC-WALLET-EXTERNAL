@@ -2353,11 +2353,20 @@ async function scanNetwork(network, owner, customTokens) {
       readToken(provider, network, owner, definition),
     ),
   );
+  const tokenErrors = [];
 
-  for (const result of results) {
+  for (const [index, result] of results.entries()) {
     if (result.status === "fulfilled" && result.value) {
       assets.push({ ...result.value, accountKind, accountState });
     } else if (result.status === "rejected") {
+      const definition = definitions[index];
+      tokenErrors.push({
+        symbol: definition.symbol,
+        address: definition.addresses?.[network.chainId] ?? null,
+        error: result.reason instanceof Error
+          ? result.reason.message
+          : "No se pudo consultar el contrato",
+      });
       console.warn(`[TOKEN] ${network.name}`, result.reason);
     }
   }
@@ -2367,6 +2376,7 @@ async function scanNetwork(network, owner, customTokens) {
     accountKind,
     accountState,
     assets,
+    tokenErrors,
   };
 }
 
@@ -2383,10 +2393,16 @@ export async function scanAllNetworks(ownerAddress, customTokens = []) {
     const network = NETWORKS[index];
     if (result.status === "fulfilled") {
       assets.push(...result.value.assets);
+      const tokenErrors = result.value.tokenErrors;
       networks[network.chainId] = {
-        status: "online",
+        status: tokenErrors.length ? "partial" : "online",
         accountKind: result.value.accountKind,
         accountState: result.value.accountState,
+        failedTokenCount: tokenErrors.length,
+        tokenErrors,
+        error: tokenErrors.length
+          ? `${tokenErrors.length} contrato(s) ERC-20 no pudieron leerse; NO significan saldo cero.`
+          : null,
       };
     } else {
       networks[network.chainId] = {
