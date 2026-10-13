@@ -18,6 +18,7 @@ const UINT_PATTERN = /^(0|[1-9][0-9]*)$/;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const MAX_UINT256 = (1n << 256n) - 1n;
 const MAX_SAFE_DATA_HEX_LENGTH = 131_074;
+const MAX_REQUEST_BODY_BYTES = 170_000;
 const UPSTREAM_TIMEOUT_MS = 20_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_RATE_LIMIT = 10;
@@ -161,6 +162,21 @@ function proposalRateLimit(request, safeAddress, sender) {
     allowed: true,
     remaining: Math.max(0, limit - active.length),
   };
+}
+
+function requestBodyTooLarge(request) {
+  const contentLength = Number.parseInt(
+    String(request.headers?.["content-length"] ?? ""),
+    10,
+  );
+  if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
+    return true;
+  }
+  try {
+    return Buffer.byteLength(JSON.stringify(request.body ?? {}), "utf8") > MAX_REQUEST_BODY_BYTES;
+  } catch {
+    return true;
+  }
 }
 
 function serviceUrls(chainId) {
@@ -390,6 +406,12 @@ export default async function handler(request, response) {
   if (request.method !== "POST") {
     return json(request, response, 405, {
       error: "Metodo no permitido",
+    });
+  }
+
+  if (requestBodyTooLarge(request)) {
+    return json(request, response, 413, {
+      error: "Solicitud Safe demasiado grande",
     });
   }
 

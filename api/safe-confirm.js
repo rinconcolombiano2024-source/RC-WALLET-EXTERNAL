@@ -230,11 +230,18 @@ function confirmationRateLimit({ request, chainId, safeTxHash, signer }) {
   };
 }
 
-function approximateBodyBytes(body) {
+function requestBodyTooLarge(request) {
+  const contentLength = Number.parseInt(
+    String(request.headers?.["content-length"] ?? ""),
+    10,
+  );
+  if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+    return true;
+  }
   try {
-    return Buffer.byteLength(JSON.stringify(body ?? {}), "utf8");
+    return Buffer.byteLength(JSON.stringify(request.body ?? {}), "utf8") > MAX_BODY_BYTES;
   } catch {
-    return Number.POSITIVE_INFINITY;
+    return true;
   }
 }
 
@@ -475,7 +482,7 @@ export default async function handler(request, response) {
     });
   }
 
-  if (approximateBodyBytes(request.body) > MAX_BODY_BYTES) {
+  if (requestBodyTooLarge(request)) {
     return json(request, response, 413, {
       error: "Solicitud demasiado grande",
     });

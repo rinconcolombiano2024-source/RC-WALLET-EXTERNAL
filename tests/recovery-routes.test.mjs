@@ -8,7 +8,7 @@ function read(relativePath) {
 function requireAll(source, required, label) {
   for (const needle of required) {
     assert.ok(
-      source.includes(needle),
+      source.includes(needle) || source.replace(/\s+/g, " ").includes(needle),
       `${label} is missing required recovery/security invariant: ${needle}`,
     );
   }
@@ -386,7 +386,7 @@ requireRegex(
 
 requireRegex(
   counterfactualEngineSource,
-  /sourceSafeState\?\.detected\s*===\s*true/,
+  /sourceSafeState\s*\?\.\s*detected\s*===\s*true/,
   "Counterfactual engine must require a positively verified source Safe",
 );
 

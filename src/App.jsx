@@ -2728,8 +2728,19 @@ export default function App() {
       gasPayerConnectionRef.current?.cleanup?.();
       qrScanActiveRef.current = false;
       stopQrScannerStream(qrStreamRef.current);
+      privateKeyRef.current = "";
     };
   }, []);
+
+  // A saved balance belongs to the exact address scanned. A scan that was
+  // started for another address must never populate the new owner's screen.
+  useEffect(() => {
+    scanIdRef.current += 1;
+    setScanning(false);
+    setAssets([]);
+    setNetworkStates({});
+    setSelectedAssetId("");
+  }, [targetAddress]);
 
   useEffect(() => {
     const handleBeforeInstallPrompt = (event) => {
@@ -2966,13 +2977,18 @@ export default function App() {
         (asset) => asset.chainId !== WORLD_CHAIN_ID,
       ).length;
 
+      const incomplete = Object.values(result.networks).filter(
+        (state) => state.status !== "online",
+      ).length;
       showStatus(
-        result.assets.length
-          ? externalAssetCount
-            ? `Escaneo completado: ${externalAssetCount} activo(s) fuera de World Chain listos para revisar.`
-            : `Escaneo completado: ${result.assets.length} activo(s) en World Chain. No se detectaron fondos externos configurados.`
-          : "No se encontraron balances entre los activos configurados.",
-        "success",
+        incomplete
+          ? `Escaneo incompleto en ${incomplete} red(es). Los contratos no consultados NO equivalen a saldo cero.`
+          : result.assets.length
+            ? externalAssetCount
+              ? `Escaneo completado: ${externalAssetCount} activo(s) externos detectados para revisar.`
+              : `Escaneo completado: ${result.assets.length} activo(s) en World Chain.`
+            : "No se encontraron balances entre los activos configurados.",
+        incomplete ? "warning" : "success",
       );
     } catch (error) {
       console.error("[SCAN]", error);
@@ -3128,7 +3144,8 @@ export default function App() {
         type: "private-key",
         name: LOCAL_PRIVATE_KEY_CONNECTION_NAME,
         account: address,
-        privateKey,
+        // Retain secret only in the short-lived ref; never duplicate it on the
+        // connection object that is reused by non-signing UI code.
       };
 
       setPrivateKeyInput("");
@@ -3168,6 +3185,7 @@ export default function App() {
       );
     } catch (error) {
       privateKeyRef.current = "";
+      setPrivateKeyInput("");
       showStatus(
         error instanceof Error
           ? error.message
@@ -3623,7 +3641,7 @@ export default function App() {
             result = {
               route: "local-private-key-gas-payer",
               ...(await sendWithPrivateKeyOwnerAndGasPayer({
-                privateKey: privateKeyRef.current || externalConnection.privateKey,
+                privateKey: privateKeyRef.current,
                 gasPayerProvider: gasPayerConnection.provider,
                 asset: selectedAsset,
                 targetAddress,
@@ -3637,7 +3655,7 @@ export default function App() {
           result = {
             route: "local-private-key",
             ...(await sendWithPrivateKeyWallet({
-              privateKey: privateKeyRef.current || externalConnection.privateKey,
+              privateKey: privateKeyRef.current,
               asset: selectedAsset,
               targetAddress,
               recipient: destination,
@@ -5499,10 +5517,13 @@ export default function App() {
                             ? "dot--green"
                             : state?.status === "offline"
                               ? "dot--red"
-                              : ""
+                              : "dot--amber"
                         }`}
                       />
                       <span>{network.name}</span>
+                      {state?.status === "partial" && (
+                        <small title={state.error ?? "Error de lectura ERC-20"}>lectura parcial</small>
+                      )}
                       {state?.accountKind === "contract" && (
                         <small>contrato</small>
                       )}

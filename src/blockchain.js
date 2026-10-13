@@ -244,8 +244,9 @@ export async function getProvider(network) {
   }
 
   for (const rpcUrl of network.rpcUrls) {
+    let provider = null;
     try {
-      const provider = new ethers.JsonRpcProvider(
+      provider = new ethers.JsonRpcProvider(
         rpcUrl,
         network.chainId,
         {
@@ -253,13 +254,17 @@ export async function getProvider(network) {
           batchMaxCount: 1,
         },
       );
-      const providerNetwork = await timeout(
-        provider.getNetwork(),
+      // staticNetwork is only a local assumption, not a verified node response.
+      const actualChainId = await timeout(
+        provider.send("eth_chainId", []),
         7_000,
-        network.name,
+        network.name + " chain ID",
       );
-
-      if (Number(providerNetwork.chainId) !== network.chainId) {
+      if (
+        !/^0x[\da-f]+$/i.test(String(actualChainId)) ||
+        Number(BigInt(actualChainId)) !== network.chainId
+      ) {
+        provider.destroy();
         throw new Error("El RPC respondió con una chainId distinta");
       }
 
@@ -267,6 +272,9 @@ export async function getProvider(network) {
       providerCache.set(network.chainId, provider);
       return provider;
     } catch (error) {
+      // A timed-out endpoint may still have pending ethers requests. Prevent
+      // retries from retaining background network operations.
+      try { provider?.destroy(); } catch { /* endpoint already discarded */ }
       console.warn(`[RPC] ${network.name}: ${rpcUrl}`, error);
     }
   }
@@ -2349,11 +2357,20 @@ async function scanNetwork(network, owner, customTokens) {
       readToken(provider, network, owner, definition),
     ),
   );
+  const tokenErrors = [];
 
-  for (const result of results) {
+  for (const [index, result] of results.entries()) {
     if (result.status === "fulfilled" && result.value) {
       assets.push({ ...result.value, accountKind, accountState });
     } else if (result.status === "rejected") {
+      const definition = definitions[index];
+      tokenErrors.push({
+        symbol: definition.symbol,
+        address: definition.addresses?.[network.chainId] ?? null,
+        error: result.reason instanceof Error
+          ? result.reason.message
+          : "No se pudo consultar el contrato",
+      });
       console.warn(`[TOKEN] ${network.name}`, result.reason);
     }
   }
@@ -2363,6 +2380,7 @@ async function scanNetwork(network, owner, customTokens) {
     accountKind,
     accountState,
     assets,
+    tokenErrors,
   };
 }
 
@@ -2379,10 +2397,16 @@ export async function scanAllNetworks(ownerAddress, customTokens = []) {
     const network = NETWORKS[index];
     if (result.status === "fulfilled") {
       assets.push(...result.value.assets);
+      const tokenErrors = result.value.tokenErrors;
       networks[network.chainId] = {
-        status: "online",
+        status: tokenErrors.length ? "partial" : "online",
         accountKind: result.value.accountKind,
         accountState: result.value.accountState,
+        failedTokenCount: tokenErrors.length,
+        tokenErrors,
+        error: tokenErrors.length
+          ? `${tokenErrors.length} contrato(s) ERC-20 no pudieron leerse; NO significan saldo cero.`
+          : null,
       };
     } else {
       networks[network.chainId] = {

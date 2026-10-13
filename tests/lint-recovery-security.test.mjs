@@ -42,7 +42,7 @@ for (const required of [
   "matches",
 ]) {
   assert.ok(
-    recoveryEngineSource.includes(required),
+    recoveryEngineSource.includes(required) || recoveryEngineSource.replace(/\s+/g, " ").includes(required),
     `Recovery module is missing safety marker: ${required}`,
   );
 }
