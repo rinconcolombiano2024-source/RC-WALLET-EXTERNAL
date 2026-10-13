@@ -225,8 +225,9 @@ export async function getProvider(network) {
   if (providerCache.has(network.chainId)) return providerCache.get(network.chainId);
 
   for (const rpcUrl of network.rpcUrls) {
+    let provider = null;
     try {
-      const provider = new ethers.JsonRpcProvider(rpcUrl, network.chainId, {
+      provider = new ethers.JsonRpcProvider(rpcUrl, network.chainId, {
         staticNetwork: true,
         batchMaxCount: 1,
       });
@@ -247,6 +248,9 @@ export async function getProvider(network) {
       providerCache.set(network.chainId, provider);
       return provider;
     } catch (error) {
+      // A timed-out endpoint may still have pending ethers requests. Prevent
+      // retries from retaining background network operations.
+      try { provider?.destroy(); } catch { /* endpoint already discarded */ }
       console.warn(`[RPC ${network.name}]`, error);
     }
   }
