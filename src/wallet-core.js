@@ -5,10 +5,16 @@ import {
   NETWORKS,
   SAFE_INTROSPECTION_ABI,
   SAFE_SENTINEL,
-  STORAGE_KEYS,
   TOKENS,
   WORLD_CHAIN_ID,
 } from "./config.js";
+
+// Legacy vault helpers in this separate module are not connected to App.jsx.
+// Keep any compatibility storage names local; do not invent config exports.
+const STORAGE_KEYS = Object.freeze({
+  vault: "rc_wallet_external_legacy_vault_v1",
+  customTokens: "rc_wallet_external_legacy_custom_tokens_v1",
+});
 
 const providerCache = new Map();
 const encoder = new TextEncoder();
