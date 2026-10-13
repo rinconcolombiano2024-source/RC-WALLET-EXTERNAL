@@ -253,13 +253,17 @@ export async function getProvider(network) {
           batchMaxCount: 1,
         },
       );
-      const providerNetwork = await timeout(
-        provider.getNetwork(),
+      // staticNetwork is only a local assumption, not a verified node response.
+      const actualChainId = await timeout(
+        provider.send("eth_chainId", []),
         7_000,
-        network.name,
+        network.name + " chain ID",
       );
-
-      if (Number(providerNetwork.chainId) !== network.chainId) {
+      if (
+        !/^0x[\da-f]+$/i.test(String(actualChainId)) ||
+        Number(BigInt(actualChainId)) !== network.chainId
+      ) {
+        provider.destroy();
         throw new Error("El RPC respondió con una chainId distinta");
       }
 
