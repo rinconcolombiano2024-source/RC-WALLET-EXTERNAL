@@ -73,7 +73,7 @@ const mismatchAnalysis = analyzeCounterfactualSafeRecovery({
 
 assert.equal(
   mismatchAnalysis.reconstructionStatus,
-  RECOVERY_STATES.PREDICTED_ADDRESS_MISMATCH,
+  RECOVERY_STATES.SOURCE_PREDICTED_ADDRESS_MISMATCH,
 );
 assert.equal(mismatchAnalysis.addressMatches, false);
 assert.equal(mismatchAnalysis.recoveryPossible, false);
