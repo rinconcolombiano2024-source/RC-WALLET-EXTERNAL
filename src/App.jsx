@@ -3128,7 +3128,8 @@ export default function App() {
         type: "private-key",
         name: LOCAL_PRIVATE_KEY_CONNECTION_NAME,
         account: address,
-        privateKey,
+        // Retain secret only in the short-lived ref; never duplicate it on the
+        // connection object that is reused by non-signing UI code.
       };
 
       setPrivateKeyInput("");
@@ -3168,6 +3169,7 @@ export default function App() {
       );
     } catch (error) {
       privateKeyRef.current = "";
+      setPrivateKeyInput("");
       showStatus(
         error instanceof Error
           ? error.message
@@ -3623,7 +3625,7 @@ export default function App() {
             result = {
               route: "local-private-key-gas-payer",
               ...(await sendWithPrivateKeyOwnerAndGasPayer({
-                privateKey: privateKeyRef.current || externalConnection.privateKey,
+                privateKey: privateKeyRef.current,
                 gasPayerProvider: gasPayerConnection.provider,
                 asset: selectedAsset,
                 targetAddress,
@@ -3637,7 +3639,7 @@ export default function App() {
           result = {
             route: "local-private-key",
             ...(await sendWithPrivateKeyWallet({
-              privateKey: privateKeyRef.current || externalConnection.privateKey,
+              privateKey: privateKeyRef.current,
               asset: selectedAsset,
               targetAddress,
               recipient: destination,
