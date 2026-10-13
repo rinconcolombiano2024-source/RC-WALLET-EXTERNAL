@@ -2732,6 +2732,16 @@ export default function App() {
     };
   }, []);
 
+  // A saved balance belongs to the exact address scanned. A scan that was
+  // started for another address must never populate the new owner's screen.
+  useEffect(() => {
+    scanIdRef.current += 1;
+    setScanning(false);
+    setAssets([]);
+    setNetworkStates({});
+    setSelectedAssetId("");
+  }, [targetAddress]);
+
   useEffect(() => {
     const handleBeforeInstallPrompt = (event) => {
       event.preventDefault();
