@@ -47,7 +47,7 @@ export function normalizeAddress(address) {
     throw new Error("Introduce una dirección EVM válida.");
   }
 
-  return ethers.getAddress(candidate.toLowerCase());
+  return ethers.getAddress(candidate);
 }
 
 export function tryNormalizeAddress(address) {
@@ -230,6 +230,19 @@ export async function getProvider(network) {
         staticNetwork: true,
         batchMaxCount: 1,
       });
+      // ethers staticNetwork returns its configured chain; query the node itself.
+      const actualChainId = await timeout(
+        provider.send("eth_chainId", []),
+        8_000,
+        network.name + " chain ID",
+      );
+      if (
+        !/^0x[\da-f]+$/i.test(String(actualChainId)) ||
+        Number(BigInt(actualChainId)) !== network.chainId
+      ) {
+        provider.destroy();
+        throw new Error("RPC chainId mismatch");
+      }
       await timeout(provider.getBlockNumber(), 8_000, network.name);
       providerCache.set(network.chainId, provider);
       return provider;
@@ -322,11 +335,18 @@ async function inspectEip1271(provider, address, hasCode) {
       ethers.ZeroHash,
       "0x",
     ]);
-    await timeout(provider.call({ to: address, data }), 8_000, "EIP-1271");
+    const response = await timeout(
+      provider.call({ to: address, data }),
+      8_000,
+      "EIP-1271",
+    );
+    // An empty test signature cannot verify control of the contract account.
+    // Even an EIP-1271 magic response here says nothing about this user's key.
     return {
       checked: true,
-      supported: true,
-      reason: "La cuenta expone isValidSignature.",
+      supported: false,
+      validForEmptyTest: String(response).slice(0, 10).toLowerCase() === "0x1626ba7e",
+      reason: "EIP-1271 solo confirma firmas para un hash y una firma reales; no demuestra autorización del usuario.",
     };
   } catch (error) {
     return {
