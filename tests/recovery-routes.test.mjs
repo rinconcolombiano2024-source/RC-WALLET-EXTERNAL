@@ -386,7 +386,7 @@ requireRegex(
 
 requireRegex(
   counterfactualEngineSource,
-  /sourceSafeState\?\.detected\s*===\s*true/,
+  /sourceSafeState\s*\?\.\s*detected\s*===\s*true/,
   "Counterfactual engine must require a positively verified source Safe",
 );
 
