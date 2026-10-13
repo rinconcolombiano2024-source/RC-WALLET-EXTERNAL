@@ -1,0 +1,38 @@
+name: RC Wallet External CI
+
+on:
+  push:
+    branches:
+      - main
+      - "engineering/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Dependencies, security checks, tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned pnpm and Node 24
+        uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          require-lockfile: true
+      - name: Show resolved dependencies
+        run: pnpm list --depth 0
+      - name: Existing functional tests
+        run: pnpm test:wallet
+      - name: RPC identity and secret-handling regressions
+        run: node --test tests/verified-rpc-and-keys.test.mjs
+      - name: Recovery safety tests
+        run: pnpm lint
+      - name: Import/type checks
+        run: pnpm typecheck
+      - name: Production build
+        run: pnpm build
+      - name: Audit high and critical vulnerabilities
+        run: pnpm audit --audit-level high
