@@ -28,7 +28,6 @@ import {
   sendWithPrivateKeyWallet,
   sendWithPrivateKeyOwnerAndGasPayer,
   forgeSafeMirrorDeployment,
-  validateManualSafeMirrorDeployment,
 } from "./blockchain.js";
 import {
   ADMIN_FEE_WALLET,
@@ -768,8 +767,11 @@ function getExternalExecutionRoute({
   );
   const mirrorReady = Boolean(
     mirrorOwner &&
-      mirror?.deployment?.ready &&
-      mirror?.deployment?.targetPredictionMatches,
+      mirror?.deployment?.ready === true &&
+      mirror?.deployment?.receiptVerified === true &&
+      mirror?.deployment?.sourceProofVerified === true &&
+      mirror?.deployment?.targetPredictionMatches === true &&
+      mirror?.deployment?.forkSimulationPassed === true,
   );
   const networkName = asset.networkName || asset.network?.name || "esta red";
   const gasSymbol = asset.network?.symbol || "gas";
@@ -2021,22 +2023,8 @@ export default function App() {
   const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [privateKeyTargetAddressInput, setPrivateKeyTargetAddressInput] =
     useState("");
-  const [manualSafeMethod, setManualSafeMethod] =
-    useState("createProxyWithNonce");
-  const [manualSafeFactory, setManualSafeFactory] = useState("");
-  const [manualSafeSingleton, setManualSafeSingleton] = useState("");
-  const [manualSafeInitializer, setManualSafeInitializer] = useState("");
-  const [manualSafeSaltNonce, setManualSafeSaltNonce] = useState("");
-  const [manualSafeCallback, setManualSafeCallback] = useState("");
-  const [manualSafeStatus, setManualSafeStatus] = useState(null);
-  const [manualSafeBusy, setManualSafeBusy] = useState(false);
-  const [safeForgeStart, setSafeForgeStart] = useState("0");
-  const [safeForgeEnd, setSafeForgeEnd] = useState("5000");
-  const [safeForgeSetupTo, setSafeForgeSetupTo] = useState("");
-  const [safeForgeSetupData, setSafeForgeSetupData] = useState("0x");
-  const [safeForgeExtraHandlers, setSafeForgeExtraHandlers] = useState("");
-  const [safeForgeStatus, setSafeForgeStatus] = useState(null);
-  const [safeForgeBusy, setSafeForgeBusy] = useState(false);
+  const [safeRecoveryStatus, setSafeRecoveryStatus] = useState(null);
+  const [safeRecoveryBusy, setSafeRecoveryBusy] = useState(false);
   const [assets, setAssets] = useState([]);
   const [networkStates, setNetworkStates] = useState({});
   const [selectedAssetId, setSelectedAssetId] = useState("");
@@ -2146,14 +2134,19 @@ export default function App() {
     [connectedExternalAddress, selectedAsset, targetAddress],
   );
 
-  const selectedAssetCounterfactualSafeReady = useMemo(
-    () =>
-      Boolean(
-        selectedAssetUsesCounterfactualSafeOwnerSigner &&
-          selectedAsset?.accountState?.counterfactualSafe?.deployment?.ready,
-      ),
-    [selectedAsset, selectedAssetUsesCounterfactualSafeOwnerSigner],
-  );
+  const selectedAssetCounterfactualSafeReady = useMemo(() => {
+    const deployment =
+      selectedAsset?.accountState?.counterfactualSafe?.deployment;
+
+    return Boolean(
+      selectedAssetUsesCounterfactualSafeOwnerSigner &&
+        deployment?.ready === true &&
+        deployment?.receiptVerified === true &&
+        deployment?.sourceProofVerified === true &&
+        deployment?.targetPredictionMatches === true &&
+        deployment?.forkSimulationPassed === true,
+    );
+  }, [selectedAsset, selectedAssetUsesCounterfactualSafeOwnerSigner]);
 
   const externalMatches = useMemo(() => {
     if (!targetAddress || !connectedExternalAddress) return false;
@@ -4417,7 +4410,7 @@ export default function App() {
       isValidEvmAddressInput(recipient),
   );
 
-  const applyManualSafeMirrorDeployment = useCallback(async () => {
+  const runVerifiedSafeRecovery = useCallback(async () => {
     if (!selectedAsset) {
       showStatus("Selecciona primero el token que quieres mover.", "warning");
       return;
@@ -4426,152 +4419,69 @@ export default function App() {
     const mirror = selectedAsset.accountState?.counterfactualSafe;
     if (!mirror?.detected) {
       showStatus(
-        "Primero RC Wallet debe detectar que esta direccion es Safe en World Chain.",
+        "Primero RC Wallet debe verificar que esta direccion es una Safe en World Chain.",
         "warning",
       );
       return;
     }
 
-    setManualSafeBusy(true);
-    setManualSafeStatus(null);
-
-    try {
-      const deployment = await validateManualSafeMirrorDeployment({
-        network: selectedAsset.network,
-        targetAddress,
-        manualDeployment: {
-          method: manualSafeMethod,
-          factory: manualSafeFactory,
-          singleton: manualSafeSingleton,
-          initializer: manualSafeInitializer,
-          saltNonce: manualSafeSaltNonce,
-          callback: manualSafeCallback,
-        },
-      });
-
-      const updatedAccountState = {
-        ...(selectedAsset.accountState ?? {}),
-        counterfactualSafe: {
-          ...mirror,
-          detected: true,
-          deploymentRequired: true,
-          deployment,
-          deploymentError: null,
-          requirement:
-            "Datos manuales validados: desplegar la misma Safe y ejecutar desde owner",
-        },
-      };
-
-      if (
-        connectedExternalAddress &&
-        !safeMirrorOwnersInclude(updatedAccountState, connectedExternalAddress)
-      ) {
-        throw new Error(
-          "La wallet conectada no aparece como owner de la Safe original.",
-        );
-      }
-
-      if (!deployment.ready) {
-        setManualSafeStatus({
-          type: "warning",
-          message:
-            "Los datos recrean la Safe original, pero no estan listos para desplegar en esta red. Revisa factory/singleton desplegados y metodo usado.",
-        });
-        showStatus(
-          "Ruta Safe manual verificada parcialmente. Aun no esta lista para desplegar.",
-          "warning",
-        );
-        return;
-      }
-
-      setAssets((current) =>
-        current.map((asset) =>
-          asset.chainId === selectedAsset.chainId
-            ? { ...asset, accountState: updatedAccountState }
-            : asset,
-        ),
-      );
-      setNetworkStates((current) => ({
-        ...current,
-        [selectedAsset.chainId]: {
-          ...(current[selectedAsset.chainId] ?? {}),
-          accountKind: updatedAccountState.kind ?? "no-contract",
-          accountState: updatedAccountState,
-        },
-      }));
-      setManualSafeStatus({
-        type: "success",
-        message:
-          "Ruta Safe manual lista: la prediccion coincide y puede usarse para desplegar y mover.",
-      });
+    if (!connectedExternalAddress) {
       showStatus(
-        "Ruta Safe manual lista. Completa destino y monto para desplegar la Safe y mover los fondos.",
-        "success",
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "No se pudo validar la ruta Safe manual";
-      setManualSafeStatus({ type: "error", message });
-      showStatus(message, "error");
-    } finally {
-      if (mountedRef.current) setManualSafeBusy(false);
-    }
-  }, [
-    connectedExternalAddress,
-    manualSafeCallback,
-    manualSafeFactory,
-    manualSafeInitializer,
-    manualSafeMethod,
-    manualSafeSaltNonce,
-    manualSafeSingleton,
-    selectedAsset,
-    showStatus,
-    targetAddress,
-  ]);
-
-  const runSafeForgeSearch = useCallback(async () => {
-    if (!selectedAsset) {
-      showStatus("Selecciona primero el token que quieres mover.", "warning");
-      return;
-    }
-
-    const mirror = selectedAsset.accountState?.counterfactualSafe;
-    if (!mirror?.detected) {
-      showStatus(
-        "Primero RC Wallet debe detectar que esta direccion es Safe en World Chain.",
+        "Conecta o importa primero el owner autorizado de la Safe World.",
         "warning",
       );
       return;
     }
 
-    setSafeForgeBusy(true);
-    setSafeForgeStatus(null);
+    if (
+      !safeMirrorOwnersInclude(
+        selectedAsset.accountState,
+        connectedExternalAddress,
+      )
+    ) {
+      showStatus(
+        "El firmante conectado no aparece como owner de la Safe World.",
+        "error",
+      );
+      return;
+    }
+
+    setSafeRecoveryBusy(true);
+    setSafeRecoveryStatus(null);
 
     try {
-      const extraFallbackHandlers = safeForgeExtraHandlers
-        .split(/[\s,;]+/)
-        .map((item) => item.trim())
-        .filter(Boolean);
       const result = await forgeSafeMirrorDeployment({
         network: selectedAsset.network,
         targetAddress,
-        saltNonceStart: safeForgeStart,
-        saltNonceEnd: safeForgeEnd,
-        setupTo: safeForgeSetupTo || undefined,
-        setupData: safeForgeSetupData || "0x",
-        extraFallbackHandlers,
+        connectedOwnerAddress: connectedExternalAddress,
       });
-      const deployment =
-        result?.targetPrediction || result?.ready ? result : result?.deployment;
 
-      if (!deployment) {
-        const message = `Safe Forge no encontro coincidencia en ${result.attempts} intento(s). Amplia el rango o agrega setup/fallback handler si World App uso una plantilla distinta.`;
-        setSafeForgeStatus({ type: "warning", message });
-        showStatus(message, "warning");
-        return;
+      const blockers = result?.recoveryAnalysis?.blockers ?? [];
+      const backendAllowsRecovery =
+        result?.recoveryAnalysis?.recoveryPossible === true;
+
+      if (!backendAllowsRecovery || blockers.length > 0) {
+        const message = blockers.length
+          ? "Recovery bloqueado: " + blockers.join(" | ")
+          : "El motor on-chain no autorizo la recuperacion.";
+        throw new Error(message);
       }
+
+      if (
+        result?.receiptVerified !== true ||
+        result?.sourceProofVerified !== true ||
+        result?.targetPredictionMatches !== true
+      ) {
+        throw new Error(
+          "La prueba de creacion/CREATE2 no supera todas las verificaciones obligatorias.",
+        );
+      }
+
+      const deployment = {
+        ...result,
+        forkSimulationPassed:
+          result?.forkSimulationPassed === true,
+      };
 
       const updatedAccountState = {
         ...(selectedAsset.accountState ?? {}),
@@ -4582,50 +4492,64 @@ export default function App() {
           deployment,
           deploymentError: null,
           requirement:
-            "Safe Forge encontro una creacion que predice exactamente la direccion con fondos",
+            deployment.forkSimulationPassed
+              ? "Prueba on-chain y simulacion verificadas. Lista para revision final."
+              : "Prueba on-chain verificada. Falta simulacion fork antes de mainnet.",
         },
       };
 
-      setAssets((current) =>
-        current.map((asset) =>
-          asset.chainId === selectedAsset.chainId
+      setAssets((currentAssets) =>
+        currentAssets.map((asset) =>
+          asset.id === selectedAsset.id
             ? { ...asset, accountState: updatedAccountState }
             : asset,
         ),
       );
-      setNetworkStates((current) => ({
-        ...current,
+
+      setNetworkStates((currentStates) => ({
+        ...currentStates,
         [selectedAsset.chainId]: {
-          ...(current[selectedAsset.chainId] ?? {}),
+          ...(currentStates[selectedAsset.chainId] ?? {}),
           accountKind: updatedAccountState.kind ?? "no-contract",
           accountState: updatedAccountState,
         },
       }));
 
-      const message = deployment.ready
-        ? `Safe Forge encontro ruta lista con salt ${deployment.saltNonce}. Ya puedes desplegar Safe y mover si conectas el owner.`
-        : `Safe Forge encontro coincidencia con salt ${deployment.saltNonce}, pero falta factory/singleton en la red destino.`;
-      setSafeForgeStatus({
-        type: deployment.ready ? "success" : "warning",
+      const creationTx =
+        result?.sourceCreation?.transactionHash ??
+        result?.sourceTransactionHash ??
+        null;
+
+      const creationSuffix = creationTx
+        ? " · creation tx " + compactAddress(creationTx)
+        : "";
+
+      const message = deployment.forkSimulationPassed
+        ? "Recovery verificado y simulado" + creationSuffix + "."
+        : "Prueba on-chain verificada" +
+          creationSuffix +
+          ". Falta simulacion fork antes de habilitar mainnet.";
+
+      setSafeRecoveryStatus({
+        type: deployment.forkSimulationPassed ? "success" : "warning",
         message,
       });
-      showStatus(message, deployment.ready ? "success" : "warning");
+      showStatus(
+        message,
+        deployment.forkSimulationPassed ? "success" : "warning",
+      );
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
-          : "Safe Forge no pudo completar la busqueda";
-      setSafeForgeStatus({ type: "error", message });
+          : "No se pudo verificar la recuperacion Safe.";
+      setSafeRecoveryStatus({ type: "error", message });
       showStatus(message, "error");
     } finally {
-      if (mountedRef.current) setSafeForgeBusy(false);
+      if (mountedRef.current) setSafeRecoveryBusy(false);
     }
   }, [
-    safeForgeEnd,
-    safeForgeExtraHandlers,
-    safeForgeSetupData,
-    safeForgeSetupTo,
-    safeForgeStart,
+    connectedExternalAddress,
     selectedAsset,
     showStatus,
     targetAddress,
@@ -6007,199 +5931,82 @@ export default function App() {
             {selectedAsset?.accountState?.counterfactualSafe?.detected && (
               <div className="manual-safe-lab safe-forge-lab">
                 <div>
-                  <span className="eyebrow">Ruta experimental segura</span>
-                  <strong>Safe Forge auto</strong>
+                  <span className="eyebrow">Recuperacion Safe verificada</span>
+                  <strong>Prueba on-chain deterministica</strong>
                   <p>
-                    RC Wallet lee la Safe viva en World Chain, reconstruye
-                    initializers comunes con owners reales y busca un salt nonce
-                    que produzca exactamente{" "}
-                    <code>{compactAddress(targetAddress)}</code>. No envia
-                    transacciones durante la busqueda.
+                    RC Wallet recupera la transaccion real que creo la Safe,
+                    exige receipt verificado, reconstruye CREATE2 en World Chain
+                    y en la red destino y comprueba factory, singleton,
+                    initializer y dependencias. No usa brute force ni adivina salt.
                   </p>
                 </div>
-                <div className="manual-safe-grid">
-                  <label className="label">
-                    Salt inicio
-                    <input
-                      className="input"
-                      value={safeForgeStart}
-                      onChange={(event) => setSafeForgeStart(event.target.value)}
-                      placeholder="0"
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label">
-                    Salt fin
-                    <input
-                      className="input"
-                      value={safeForgeEnd}
-                      onChange={(event) => setSafeForgeEnd(event.target.value)}
-                      placeholder="5000"
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label">
-                    Setup to
-                    <input
-                      className="input"
-                      value={safeForgeSetupTo}
-                      onChange={(event) =>
-                        setSafeForgeSetupTo(event.target.value)
-                      }
-                      placeholder="Opcional"
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label">
-                    Setup data
-                    <input
-                      className="input"
-                      value={safeForgeSetupData}
-                      onChange={(event) =>
-                        setSafeForgeSetupData(event.target.value)
-                      }
-                      placeholder="0x"
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label manual-safe-grid__wide">
-                    Fallback handlers extra
-                    <input
-                      className="input"
-                      value={safeForgeExtraHandlers}
-                      onChange={(event) =>
-                        setSafeForgeExtraHandlers(event.target.value)
-                      }
-                      placeholder="0x... separados por coma o espacio"
-                      spellCheck="false"
-                    />
-                  </label>
-                </div>
-                <button
-                  className="button button--deploy-safe"
-                  type="button"
-                  disabled={safeForgeBusy}
-                  onClick={runSafeForgeSearch}
-                >
-                  {safeForgeBusy
-                    ? "Buscando despliegue..."
-                    : "Buscar despliegue Safe"}
-                </button>
-                {safeForgeStatus && (
-                  <p className={`manual-safe-status manual-safe-status--${safeForgeStatus.type}`}>
-                    {safeForgeStatus.message}
-                  </p>
-                )}
-              </div>
-            )}
 
-            {selectedAsset?.accountState?.counterfactualSafe?.detected && (
-              <div className="manual-safe-lab">
-                <div>
-                  <span className="eyebrow">Ruta avanzada</span>
-                  <strong>Safe manual deploy</strong>
-                  <p>
-                    Si la busqueda automatica no encontro la creacion Safe,
-                    pega los datos originales. RC Wallet solo activa el
-                    despliegue si la prediccion coincide exactamente con{" "}
-                    <code>{compactAddress(targetAddress)}</code>.
-                  </p>
+                <div className="safe-proof-grid">
+                  <div>
+                    <span>Owner</span>
+                    <strong>
+                      {connectedExternalAddress
+                        ? compactAddress(connectedExternalAddress)
+                        : "Pendiente"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Receipt</span>
+                    <strong>
+                      {selectedAsset.accountState?.counterfactualSafe?.deployment
+                        ?.receiptVerified
+                        ? "Verificado"
+                        : "Pendiente"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>CREATE2 origen</span>
+                    <strong>
+                      {selectedAsset.accountState?.counterfactualSafe?.deployment
+                        ?.sourceProofVerified
+                        ? "Coincide"
+                        : "Pendiente"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>CREATE2 destino</span>
+                    <strong>
+                      {selectedAsset.accountState?.counterfactualSafe?.deployment
+                        ?.targetPredictionMatches
+                        ? "Coincide"
+                        : "Pendiente"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Fork simulation</span>
+                    <strong>
+                      {selectedAsset.accountState?.counterfactualSafe?.deployment
+                        ?.forkSimulationPassed
+                        ? "Aprobada"
+                        : "Obligatoria"}
+                    </strong>
+                  </div>
                 </div>
-                <div className="manual-safe-grid">
-                  <label className="label">
-                    Metodo
-                    <select
-                      className="input"
-                      value={manualSafeMethod}
-                      onChange={(event) =>
-                        setManualSafeMethod(event.target.value)
-                      }
-                    >
-                      <option value="createProxyWithNonce">
-                        createProxyWithNonce
-                      </option>
-                      <option value="createProxyWithNonceL2">
-                        createProxyWithNonceL2
-                      </option>
-                      <option value="createProxyWithCallback">
-                        createProxyWithCallback
-                      </option>
-                    </select>
-                  </label>
-                  <label className="label">
-                    Factory
-                    <input
-                      className="input"
-                      value={manualSafeFactory}
-                      onChange={(event) =>
-                        setManualSafeFactory(event.target.value)
-                      }
-                      placeholder="0x..."
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label">
-                    Singleton
-                    <input
-                      className="input"
-                      value={manualSafeSingleton}
-                      onChange={(event) =>
-                        setManualSafeSingleton(event.target.value)
-                      }
-                      placeholder="0x..."
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label manual-safe-grid__wide">
-                    Initializer
-                    <textarea
-                      className="input manual-safe-textarea"
-                      value={manualSafeInitializer}
-                      onChange={(event) =>
-                        setManualSafeInitializer(event.target.value)
-                      }
-                      placeholder="0x..."
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label">
-                    Salt nonce
-                    <input
-                      className="input"
-                      value={manualSafeSaltNonce}
-                      onChange={(event) =>
-                        setManualSafeSaltNonce(event.target.value)
-                      }
-                      placeholder="0"
-                      spellCheck="false"
-                    />
-                  </label>
-                  <label className="label">
-                    Callback
-                    <input
-                      className="input"
-                      value={manualSafeCallback}
-                      onChange={(event) =>
-                        setManualSafeCallback(event.target.value)
-                      }
-                      placeholder="Solo si aplica"
-                      spellCheck="false"
-                    />
-                  </label>
-                </div>
+
                 <button
                   className="button button--deploy-safe"
                   type="button"
-                  disabled={manualSafeBusy}
-                  onClick={applyManualSafeMirrorDeployment}
+                  disabled={safeRecoveryBusy || !connectedExternalAddress}
+                  onClick={runVerifiedSafeRecovery}
                 >
-                  {manualSafeBusy
-                    ? "Validando Safe..."
-                    : "Validar ruta Safe manual"}
+                  {safeRecoveryBusy
+                    ? "Verificando evidencia on-chain..."
+                    : "Verificar recuperacion Safe"}
                 </button>
-                {manualSafeStatus && (
-                  <p className={`manual-safe-status manual-safe-status--${manualSafeStatus.type}`}>
-                    {manualSafeStatus.message}
+
+                {safeRecoveryStatus && (
+                  <p
+                    className={
+                      "manual-safe-status manual-safe-status--" +
+                      safeRecoveryStatus.type
+                    }
+                  >
+                    {safeRecoveryStatus.message}
                   </p>
                 )}
               </div>
