@@ -11,6 +11,7 @@ import {
   SAFE_INTROSPECTION_ABI,
   SAFE_MODULE_SETUP_ABI,
   SAFE_PROXY_FACTORY_ABI,
+  SAFE_PROXY_FACTORY_V141_METHODS,
   TOKENS,
   WORLD_CHAIN_ID,
 } from "./config.js";
@@ -35,18 +36,16 @@ const BPS_DENOMINATOR = 10_000n;
 const GAS_LIMIT_BUFFER_BPS = 12_000n;
 const GAS_PRICE_BUFFER_BPS = 12_000n;
 const SAFE_OPERATION_CALL = 0;
-const SAFE_CREATION_LOG_BATCH_SIZE = 250_000;
-const SAFE_CREATION_LOG_MAX_BATCHES = 160;
+const MAX_UINT256 = (1n << 256n) - 1n;
+const MAX_SAFE_INITIALIZER_BYTES = 64 * 1024;
+const SAFE_CREATION_LOG_BATCH_SIZE = 25_000;
+const SAFE_CREATION_LOG_MAX_BATCHES = 64;
 const SAFE_CHAIN_SPECIFIC_CREATION_METHODS = new Set([
   "createChainSpecificProxyWithNonce",
-  "createChainSpecificProxyWithNonceL2",
 ]);
-const SAFE_SUPPORTED_CREATION_METHODS = new Set([
-  "createProxyWithNonce",
-  "createProxyWithNonceL2",
-  "createProxyWithCallback",
-  ...SAFE_CHAIN_SPECIFIC_CREATION_METHODS,
-]);
+const SAFE_SUPPORTED_CREATION_METHODS = new Set(
+  SAFE_PROXY_FACTORY_V141_METHODS,
+);
 const SECP256K1_ORDER =
   0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 const safeDeploymentCache = new Map();
@@ -611,26 +610,54 @@ async function getSafeProxyCreationLogs(provider, factory, proxy) {
   }
 }
 
-function safeProxyCreationLogMatches(log, proxy) {
+function decodeSafeProxyCreationLog(log, proxy) {
   try {
-    const normalizedProxy = normalizeAddress(proxy);
-    if (log.topics?.[1]) {
-      const indexedProxy = normalizeAddress(`0x${log.topics[1].slice(-40)}`);
-      if (indexedProxy === normalizedProxy) return true;
+    if (
+      log?.topics?.[0] !== SAFE_PROXY_CREATION_TOPIC ||
+      !log?.topics?.[1]
+    ) {
+      return null;
     }
 
-    if (log.data && log.data !== "0x") {
-      const [decodedProxy] = ethers.AbiCoder.defaultAbiCoder().decode(
-        ["address", "address"],
-        log.data,
-      );
-      return normalizeAddress(decodedProxy) === normalizedProxy;
+    const normalizedProxy = normalizeAddress(proxy);
+    const indexedProxy = normalizeAddress(
+      `0x${log.topics[1].slice(-40)}`,
+    );
+
+    if (indexedProxy !== normalizedProxy) {
+      return null;
     }
+
+    if (!log.data || log.data === "0x") {
+      return null;
+    }
+
+    const [singleton] = ethers.AbiCoder.defaultAbiCoder().decode(
+      ["address"],
+      log.data,
+    );
+
+    return {
+      proxy: indexedProxy,
+      singleton: normalizeAddress(singleton),
+    };
   } catch {
+    return null;
+  }
+}
+
+function safeProxyCreationLogMatches(log, proxy, expectedSingleton = null) {
+  const decoded = decodeSafeProxyCreationLog(log, proxy);
+  if (!decoded) return false;
+
+  if (
+    expectedSingleton &&
+    !safeSameAddressForCore(decoded.singleton, expectedSingleton)
+  ) {
     return false;
   }
 
-  return false;
+  return true;
 }
 
 function parseSafeFactoryTransaction(transaction) {
@@ -806,27 +833,85 @@ async function buildDeploymentFromCreation({
   creation,
 }) {
   let parsed = null;
-  let factory = creation.factory;
+  let factory = creation.factory
+    ? normalizeAddress(creation.factory)
+    : null;
+  let receiptVerified = false;
 
   if (creation.transactionHash) {
-    const transaction = await timeout(
-      provider.getTransaction(creation.transactionHash),
-      7_000,
-      "Safe creation transaction",
-    );
+    const [transaction, receipt] = await Promise.all([
+      timeout(
+        provider.getTransaction(creation.transactionHash),
+        7_000,
+        "Safe creation transaction",
+      ),
+      timeout(
+        provider.getTransactionReceipt(creation.transactionHash),
+        7_000,
+        "Safe creation receipt",
+      ),
+    ]);
+
     parsed = parseSafeFactoryTransaction(transaction);
-    if (!factory && transaction?.to) {
+
+    if (!factory && transaction?.to && parsed) {
       factory = normalizeAddress(transaction.to);
+    }
+
+    if (
+      parsed &&
+      factory &&
+      transaction?.to &&
+      normalizeAddress(transaction.to) !== factory
+    ) {
+      return null;
+    }
+
+    if (
+      parsed &&
+      factory &&
+      receipt &&
+      Number(receipt.status) === 1
+    ) {
+      receiptVerified = (receipt.logs ?? []).some(
+        (log) =>
+          safeSameAddressForCore(log.address, factory) &&
+          safeProxyCreationLogMatches(log, safeAddress),
+      );
     }
   }
 
-  if (!parsed && creation.singleton && creation.initializer && creation.saltNonce) {
+  /*
+   * Service-provided parameters may help diagnostics, but they are not
+   * deployment-authoritative unless the creation receipt was verified.
+   */
+  if (
+    !parsed &&
+    creation.singleton &&
+    creation.initializer &&
+    creation.saltNonce !== null &&
+    creation.saltNonce !== undefined &&
+    creation.saltNonce !== ""
+  ) {
+    const method =
+      creation.method ??
+      "createProxyWithNonce";
+
+    if (!SAFE_SUPPORTED_CREATION_METHODS.has(method)) {
+      return null;
+    }
+
     parsed = {
-      method: creation.method ?? "createProxyWithNonce",
-      singleton: creation.singleton,
-      initializer: creation.initializer,
-      saltNonce: creation.saltNonce,
-      callback: creation.callback ?? null,
+      method,
+      singleton: normalizeAddress(creation.singleton),
+      initializer: String(creation.initializer),
+      saltNonce: BigInt(creation.saltNonce).toString(),
+      callback:
+        method === "createProxyWithCallback"
+          ? normalizeAddress(creation.callback)
+          : creation.callback
+            ? normalizeAddress(creation.callback)
+            : null,
     };
   }
 
@@ -852,10 +937,16 @@ async function buildDeploymentFromCreation({
     factory,
     factoryVersion: "service",
     sourceChainId: WORLD_CHAIN_ID,
-    sourceTransactionHash: creation.transactionHash ?? null,
-    sourceUrl: creation.sourceUrl,
+    sourceTransactionHash:
+      creation.transactionHash ??
+      null,
+    sourceUrl:
+      creation.sourceUrl ??
+      null,
     predictedSourceAddress,
-    canReplayCrossChain: !isChainSpecificSafeCreationMethod(parsed.method),
+    receiptVerified,
+    canReplayCrossChain:
+      !isChainSpecificSafeCreationMethod(parsed.method),
   };
 }
 
@@ -906,8 +997,7 @@ function decodeAndValidateSafeSetupInitializer({
   }
 
   if (!parsed || parsed.name !== "setup") {
-    throw new Error(
-      "El initializer no corresponde a Safe.setup().",
+    throw new Error(      "El initializer no corresponde a Safe.setup().",
     );
   }
 
@@ -1129,6 +1219,26 @@ export async function validateManualSafeMirrorDeployment({
 
   const safeAddress = normalizeAddress(targetAddress);
 
+  if (
+    manualDeployment?.sourceChainId !== undefined &&
+    manualDeployment?.sourceChainId !== null &&
+    Number(manualDeployment.sourceChainId) !== WORLD_CHAIN_ID
+  ) {
+    throw new Error(
+      "sourceChainId del deployment no coincide con World Chain.",
+    );
+  }
+
+  if (
+    manualDeployment?.targetChainId !== undefined &&
+    manualDeployment?.targetChainId !== null &&
+    Number(manualDeployment.targetChainId) !== Number(network.chainId)
+  ) {
+    throw new Error(
+      "targetChainId del deployment no coincide con la red seleccionada.",
+    );
+  }
+
   const method =
     manualDeployment?.method ??
     manualDeployment?.deploymentMethod ??
@@ -1136,13 +1246,24 @@ export async function validateManualSafeMirrorDeployment({
 
   if (!SAFE_SUPPORTED_CREATION_METHODS.has(method)) {
     throw new Error(
-      "Metodo de creacion Safe no soportado",
+      `Metodo de creacion Safe no soportado por SafeProxyFactory v1.4.1: ${method}`,
     );
   }
 
   const factory = normalizeAddress(
     manualDeployment?.factory,
   );
+
+  const knownFactory = SAFE_FACTORY_CANDIDATES.some(
+    (candidate) =>
+      safeSameAddressForCore(candidate.factory, factory),
+  );
+
+  if (!knownFactory) {
+    throw new Error(
+      "La factory indicada no pertenece al catalogo Safe auditado.",
+    );
+  }
 
   const singleton = normalizeAddress(
     manualDeployment?.singleton,
@@ -1158,6 +1279,12 @@ export async function validateManualSafeMirrorDeployment({
     );
   }
 
+  if (ethers.dataLength(initializer) > MAX_SAFE_INITIALIZER_BYTES) {
+    throw new Error(
+      `Initializer Safe excede ${MAX_SAFE_INITIALIZER_BYTES} bytes.`,
+    );
+  }
+
   let saltNonce;
 
   try {
@@ -1168,9 +1295,9 @@ export async function validateManualSafeMirrorDeployment({
     throw new Error("Salt nonce Safe invalido");
   }
 
-  if (saltNonce < 0n) {
+  if (saltNonce < 0n || saltNonce > MAX_UINT256) {
     throw new Error(
-      "Salt nonce Safe no puede ser negativo",
+      "Salt nonce Safe fuera del rango uint256",
     );
   }
 
@@ -1187,19 +1314,45 @@ export async function validateManualSafeMirrorDeployment({
       getProvider(network),
     ]);
 
-  const [worldCode, targetCode] =
-    await Promise.all([
-      timeout(
-        worldProvider.getCode(safeAddress),
-        7_000,
-        "World Safe source code",
-      ),
-      timeout(
-        targetProvider.getCode(safeAddress),
-        7_000,
-        "Target Safe address code",
-      ),
-    ]);
+  const [
+    worldCode,
+    targetCode,
+    sourceFactoryCode,
+    targetFactoryCode,
+    sourceSingletonCode,
+    targetSingletonCode,
+  ] = await Promise.all([
+    timeout(
+      worldProvider.getCode(safeAddress),
+      7_000,
+      "World Safe source code",
+    ),
+    timeout(
+      targetProvider.getCode(safeAddress),
+      7_000,
+      "Target Safe address code",
+    ),
+    timeout(
+      worldProvider.getCode(factory),
+      7_000,
+      "Source Safe factory code",
+    ),
+    timeout(
+      targetProvider.getCode(factory),
+      7_000,
+      "Target Safe factory code",
+    ),
+    timeout(
+      worldProvider.getCode(singleton),
+      7_000,
+      "Source Safe singleton code",
+    ),
+    timeout(
+      targetProvider.getCode(singleton),
+      7_000,
+      "Target Safe singleton code",
+    ),
+  ]);
 
   const worldSafe = await inspectSafeAccount(
     worldProvider,
@@ -1216,7 +1369,6 @@ export async function validateManualSafeMirrorDeployment({
   const [
     sourceSingleton,
     currentFallbackHandler,
-    predictedSourceAddress,
   ] = await Promise.all([
     readSafeProxySingleton(
       worldProvider,
@@ -1226,23 +1378,104 @@ export async function validateManualSafeMirrorDeployment({
       worldProvider,
       safeAddress,
     ),
-    predictSafeProxyAddress({
-      provider: worldProvider,
-      factory,
-      singleton,
-      initializer,
-      saltNonce: saltNonce.toString(),
-      callback,
-      method,
-      chainId: WORLD_CHAIN_ID,
-    }),
   ]);
 
-  if (sourceSingleton !== singleton) {
+  if (!safeSameAddressForCore(sourceSingleton, singleton)) {
     throw new Error(
       "El singleton indicado no coincide con el singleton real de la Safe World.",
     );
   }
+
+  const sourceFactoryHasCode =
+    Boolean(sourceFactoryCode && sourceFactoryCode !== "0x");
+  const targetFactoryHasCode =
+    Boolean(targetFactoryCode && targetFactoryCode !== "0x");
+  const sourceSingletonHasCode =
+    Boolean(sourceSingletonCode && sourceSingletonCode !== "0x");
+  const targetSingletonHasCode =
+    Boolean(targetSingletonCode && targetSingletonCode !== "0x");
+
+  if (!sourceFactoryHasCode || !sourceSingletonHasCode) {
+    throw new Error(
+      "La factory o singleton fuente no tienen bytecode verificable.",
+    );
+  }
+
+  const sourceFactoryContract = new ethers.Contract(
+    factory,
+    SAFE_PROXY_FACTORY_ABI,
+    worldProvider,
+  );
+
+  const sourceProxyCreationCode = await timeout(
+    sourceFactoryContract.proxyCreationCode(),
+    7_000,
+    "Source Safe proxyCreationCode",
+  );
+
+  let targetProxyCreationCode = null;
+
+  if (targetFactoryHasCode) {
+    const targetFactoryContract = new ethers.Contract(
+      factory,
+      SAFE_PROXY_FACTORY_ABI,
+      targetProvider,
+    );
+
+    targetProxyCreationCode = await timeout(
+      targetFactoryContract.proxyCreationCode(),
+      7_000,
+      "Target Safe proxyCreationCode",
+    );
+  }
+
+  const sourceFactoryCodeHash =
+    ethers.keccak256(sourceFactoryCode);
+  const targetFactoryCodeHash =
+    targetFactoryHasCode
+      ? ethers.keccak256(targetFactoryCode)
+      : null;
+
+  const sourceSingletonCodeHash =
+    ethers.keccak256(sourceSingletonCode);
+  const targetSingletonCodeHash =
+    targetSingletonHasCode
+      ? ethers.keccak256(targetSingletonCode)
+      : null;
+
+  const sourceProxyCreationCodeHash =
+    ethers.keccak256(sourceProxyCreationCode);
+  const targetProxyCreationCodeHash =
+    targetProxyCreationCode
+      ? ethers.keccak256(targetProxyCreationCode)
+      : null;
+
+  const factoryRuntimeCodeMatches =
+    Boolean(targetFactoryCodeHash) &&
+    sourceFactoryCodeHash === targetFactoryCodeHash;
+
+  const singletonRuntimeCodeMatches =
+    Boolean(targetSingletonCodeHash) &&
+    sourceSingletonCodeHash === targetSingletonCodeHash;
+
+  const proxyCreationCodeMatches =
+    Boolean(targetProxyCreationCodeHash) &&
+    sourceProxyCreationCodeHash === targetProxyCreationCodeHash;
+
+  const predictedSourceAddress =
+    computeSafeProxyAddress({
+      factory,
+      proxyCreationCode:
+        sourceProxyCreationCode,
+      singleton,
+      initializer,
+      saltNonce:
+        saltNonce.toString(),
+      callback,
+      method,
+      chainId:
+        WORLD_CHAIN_ID,
+    });
 
   if (
     !safeSameAddressForCore(
@@ -1255,6 +1488,29 @@ export async function validateManualSafeMirrorDeployment({
     );
   }
 
+  const backendSourcePrediction =
+    manualDeployment?.sourcePrediction?.predictedAddress ??
+    manualDeployment?.predictedSourceAddress ??
+    null;
+
+  if (
+    backendSourcePrediction &&
+    !safeSameAddressForCore(
+      backendSourcePrediction,
+      predictedSourceAddress,
+    )
+  ) {
+    throw new Error(
+      "La prediccion CREATE2 fuente del backend no coincide con la recalculada localmente.",
+    );
+  }
+
+  if (manualDeployment?.sourcePrediction?.matches === false) {
+    throw new Error(
+      "El backend reporto que CREATE2 fuente no coincide con la Safe real.",
+    );
+  }
+
   const initializerAnalysis =
     decodeAndValidateSafeSetupInitializer({
       initializer,
@@ -1263,53 +1519,32 @@ export async function validateManualSafeMirrorDeployment({
       ownerSignerAddress,
     });
 
-  const targetHasCode = Boolean(
-    targetCode && targetCode !== "0x",
-  );
+  const targetHasCode =
+    Boolean(targetCode && targetCode !== "0x");
 
   const canReplayCrossChain =
     !isChainSpecificSafeCreationMethod(method);
 
-  const [
-    targetFactoryCode,
-    targetSingletonCode,
-  ] = await Promise.all([
-    timeout(
-      targetProvider.getCode(factory),
-      7_000,
-      "Safe factory target code",
-    ),
-    timeout(
-      targetProvider.getCode(singleton),
-      7_000,
-      "Safe singleton target code",
-    ),
-  ]);
-
-  const targetFactoryHasCode = Boolean(
-    targetFactoryCode &&
-      targetFactoryCode !== "0x",
-  );
-
-  const targetSingletonHasCode = Boolean(
-    targetSingletonCode &&
-      targetSingletonCode !== "0x",
-  );
-
   let targetPrediction = null;
   let targetPredictionMatches = false;
 
-  if (targetFactoryHasCode) {
+  if (
+    targetFactoryHasCode &&
+    targetProxyCreationCode
+  ) {
     targetPrediction =
-      await predictSafeProxyAddress({
-        provider: targetProvider,
+      computeSafeProxyAddress({
         factory,
+        proxyCreationCode:
+          targetProxyCreationCode,
         singleton,
         initializer,
-        saltNonce: saltNonce.toString(),
+        saltNonce:
+          saltNonce.toString(),
         callback,
         method,
-        chainId: network.chainId,
+        chainId:
+          network.chainId,
       });
 
     targetPredictionMatches =
@@ -1317,6 +1552,29 @@ export async function validateManualSafeMirrorDeployment({
         targetPrediction,
         safeAddress,
       );
+  }
+
+  const backendTargetPrediction =
+    manualDeployment?.targetPrediction?.predictedAddress ??
+    null;
+
+  if (
+    backendTargetPrediction &&
+    targetPrediction &&
+    !safeSameAddressForCore(
+      backendTargetPrediction,
+      targetPrediction,
+    )
+  ) {
+    throw new Error(
+      "La prediccion CREATE2 destino del backend no coincide con la recalculada localmente.",
+    );
+  }
+
+  if (manualDeployment?.targetPrediction?.matches === false) {
+    throw new Error(
+      "El backend reporto que CREATE2 destino no coincide con la direccion de los fondos.",
+    );
   }
 
   const dependencyAddresses = [
@@ -1351,12 +1609,19 @@ export async function validateManualSafeMirrorDeployment({
       dependencyCode[module] === true,
   );
 
+  const sourceReceiptVerified =
+    manualDeployment?.receiptVerified === true;
+
   const ready =
+    sourceReceiptVerified &&
     canReplayCrossChain &&
     !targetHasCode &&
     targetPredictionMatches &&
     targetFactoryHasCode &&
     targetSingletonHasCode &&
+    proxyCreationCodeMatches &&
+    factoryRuntimeCodeMatches &&
+    singletonRuntimeCodeMatches &&
     targetSetupToHasCode &&
     targetFallbackHandlerHasCode &&
     targetModulesHaveCode;
@@ -1366,14 +1631,16 @@ export async function validateManualSafeMirrorDeployment({
     factory,
     singleton,
     initializer,
-    saltNonce: saltNonce.toString(),
+    saltNonce:
+      saltNonce.toString(),
     callback,
 
     factoryVersion:
       manualDeployment?.factoryVersion ??
       "manual",
 
-    sourceChainId: WORLD_CHAIN_ID,
+    sourceChainId:
+      WORLD_CHAIN_ID,
 
     sourceTransactionHash:
       manualDeployment?.sourceTransactionHash ??
@@ -1383,32 +1650,57 @@ export async function validateManualSafeMirrorDeployment({
       manualDeployment?.sourceUrl ??
       "manual-safe-rescue-lab",
 
+    receiptVerified:
+      sourceReceiptVerified,
+
     predictedSourceAddress,
-    sourceProofVerified: true,
+    sourceProofVerified:
+      true,
 
     sourceSafe: {
-      version: worldSafe.version,
-      owners: worldSafe.owners,
-      threshold: worldSafe.threshold,
-      modules: worldSafe.modules,
+      version:
+        worldSafe.version,
+      owners:
+        worldSafe.owners,
+      threshold:
+        worldSafe.threshold,
+      modules:
+        worldSafe.modules,
       modulesReadable:
         worldSafe.modulesReadable,
-      singleton: sourceSingleton,
+      singleton:
+        sourceSingleton,
       fallbackHandler:
         currentFallbackHandler,
     },
 
     initializerAnalysis,
 
-    targetChainId: network.chainId,
-    targetNetworkName: network.name,
+    sourceFactoryHasCode,
+    targetFactoryHasCode,
+    sourceSingletonHasCode,
+    targetSingletonHasCode,
+
+    sourceFactoryCodeHash,
+    targetFactoryCodeHash,
+    factoryRuntimeCodeMatches,
+
+    sourceSingletonCodeHash,
+    targetSingletonCodeHash,
+    singletonRuntimeCodeMatches,
+
+    sourceProxyCreationCodeHash,
+    targetProxyCreationCodeHash,
+    proxyCreationCodeMatches,
+
+    targetChainId:
+      network.chainId,
+    targetNetworkName:
+      network.name,
 
     targetHasCode,
     targetPrediction,
     targetPredictionMatches,
-
-    targetFactoryHasCode,
-    targetSingletonHasCode,
 
     targetDependencyCode:
       dependencyCode,
@@ -1421,7 +1713,6 @@ export async function validateManualSafeMirrorDeployment({
     ready,
   };
 }
-
 
 function addressFromStorageSlot(value) {
   if (!ethers.isHexString(value, 32)) return ethers.ZeroAddress;
@@ -1451,48 +1742,114 @@ async function readSafeFallbackHandler(provider, safeAddress) {
   return addressFromStorageSlot(slot);
 }
 
-function buildSafeSetupInitializer({
-  owners,
-  threshold,
-  fallbackHandler,
-  setupTo = ethers.ZeroAddress,
-  setupData = "0x",
+async function requestCounterfactualSafeRecovery({
+  targetAddress,
+  targetChainId,
+  connectedOwnerAddress = null,
+  plannedTransfers = [],
 }) {
-  const normalizedOwners = owners.map(normalizeAddress);
-  const normalizedThreshold = BigInt(threshold);
-  const normalizedSetupTo = setupTo ? normalizeAddress(setupTo) : ethers.ZeroAddress;
-  const normalizedData =
-    typeof setupData === "string" && ethers.isHexString(setupData)
-      ? setupData
-      : "0x";
+  if (typeof fetch !== "function") {
+    throw new Error(
+      "fetch no esta disponible para consultar el motor de recuperacion.",
+    );
+  }
 
-  return SAFE_SETUP_INTERFACE.encodeFunctionData("setup", [
-    normalizedOwners,
-    normalizedThreshold,
-    normalizedSetupTo,
-    normalizedData,
-    fallbackHandler ? normalizeAddress(fallbackHandler) : ethers.ZeroAddress,
-    ethers.ZeroAddress,
-    0n,
-    ethers.ZeroAddress,
-  ]);
-}
+  const controller = new AbortController();
 
-function parseSaltSearchLimit(value, fallback) {
-  const parsed = BigInt(value ?? fallback);
-  if (parsed < 0n) throw new Error("El salt nonce no puede ser negativo");
-  return parsed;
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    20_000,
+  );
+
+  try {
+    const response = await fetch(
+      "/api/counterfactual-safe-recovery",
+      {
+        method: "POST",
+        headers: {
+          "content-type":
+            "application/json",
+        },
+        credentials:
+          "same-origin",
+        cache:
+          "no-store",
+        signal:
+          controller.signal,
+        body:
+          JSON.stringify({
+            sourceChainId:
+              WORLD_CHAIN_ID,
+            targetChainId:
+              Number(targetChainId),
+            smartAccountAddress:
+              normalizeAddress(targetAddress),
+            connectedOwnerAddress:
+              connectedOwnerAddress
+                ? normalizeAddress(connectedOwnerAddress)
+                : null,
+            plannedTransfers,
+            includeGlobalFactorySearch:
+              false,
+          }),
+      },
+    );
+
+    let payload = null;
+
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error(
+        "El motor de recuperacion devolvio una respuesta no valida.",
+      );
+    }
+
+    if (
+      !response.ok ||
+      payload?.ok !== true
+    ) {
+      throw new Error(
+        payload?.error ??
+        `Recovery API fallo con HTTP ${response.status}`,
+      );
+    }
+
+    const target =
+      (payload.targets ?? []).find(
+        (item) =>
+          Number(item?.targetChainId) ===
+          Number(targetChainId),
+      );
+
+    if (!target) {
+      throw new Error(
+        "Recovery API no devolvio analisis para la red destino.",
+      );
+    }
+
+    return {
+      payload,
+      target,
+    };
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(
+        "Recovery API: tiempo de espera agotado.",
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 
 export async function forgeSafeMirrorDeployment({
   network,
   targetAddress,
-  saltNonceStart = "0",
-  saltNonceEnd = "5000",
-  setupTo = ethers.ZeroAddress,
-  setupData = "0x",
-  extraFallbackHandlers = [],
+  connectedOwnerAddress = null,
 }) {
   if (!network) {
     throw new Error(
@@ -1500,418 +1857,128 @@ export async function forgeSafeMirrorDeployment({
     );
   }
 
-  if (Number(network.chainId) === WORLD_CHAIN_ID) {
+  if (
+    Number(network.chainId) ===
+    WORLD_CHAIN_ID
+  ) {
     throw new Error(
       "La red destino debe ser distinta de World Chain",
-    );
-  }
-
-  const worldNetwork = NETWORKS.find(
-    (item) => item.chainId === WORLD_CHAIN_ID,
-  );
-
-  if (!worldNetwork) {
-    throw new Error(
-      "World Chain no esta configurada",
     );
   }
 
   const safeAddress =
     normalizeAddress(targetAddress);
 
-  const worldProvider =
-    await getProvider(worldNetwork);
-
-  const worldCode = await timeout(
-    worldProvider.getCode(safeAddress),
-    7_000,
-    "World Chain Safe code",
-  );
-
-  const worldSafe =
-    await inspectSafeAccount(
-      worldProvider,
-      safeAddress,
-      Boolean(
-        worldCode &&
-        worldCode !== "0x",
-      ),
-    );
-
-  if (!worldSafe.detected) {
-    throw new Error(
-      "La direccion no fue detectada como Safe en World Chain",
-    );
-  }
-
   /*
-   * Primera opcion: recuperar el deployment ORIGINAL.
-   * Si existe, no hacemos brute force ni adivinamos initializer.
+   * No brute force. No guessed initializer. No guessed salt.
+   * The recovery API must prove the real source creation on-chain.
    */
-  const exactDeployment =
-    await findSafeDeploymentOnWorldChain(
-      safeAddress,
-    );
-
-  if (exactDeployment) {
-    const validated =
-      await validateManualSafeMirrorDeployment({
-        network,
-        targetAddress: safeAddress,
-        manualDeployment:
-          exactDeployment,
-      });
-
-    return {
-      ...validated,
-
-      factoryVersion:
-        exactDeployment.factoryVersion ??
-        validated.factoryVersion,
-
-      sourceTransactionHash:
-        exactDeployment.sourceTransactionHash ??
-        validated.sourceTransactionHash,
-
-      sourceUrl:
-        exactDeployment.sourceUrl ??
-        validated.sourceUrl,
-
-      forge: {
-        mode:
-          "verified-source-deployment",
-        heuristic: false,
-        attempts: 0,
-      },
-    };
-  }
-
-  /*
-   * Fallback heuristico:
-   * una coincidencia solo se acepta si reproduce por CREATE2
-   * la Safe fuente exacta y despues pasa la validacion completa.
-   */
-  const start =
-    parseSaltSearchLimit(
-      saltNonceStart,
-      "0",
-    );
-
-  const end =
-    parseSaltSearchLimit(
-      saltNonceEnd,
-      "5000",
-    );
-
-  if (end < start) {
-    throw new Error(
-      "El rango de salt nonce esta invertido",
-    );
-  }
-
-  const [
-    singleton,
-    currentFallbackHandler,
-  ] = await Promise.all([
-    readSafeProxySingleton(
-      worldProvider,
-      safeAddress,
-    ),
-    readSafeFallbackHandler(
-      worldProvider,
-      safeAddress,
-    ),
-  ]);
-
-  const fallbackHandlers = [
-    currentFallbackHandler,
-    ...extraFallbackHandlers
-      .filter(Boolean)
-      .map(normalizeAddress),
-  ].filter(
-    (item, index, list) =>
-      list.indexOf(item) === index,
-  );
-
-  const explicitSetup =
-    (
-      setupTo &&
-      normalizeAddress(setupTo) !==
-        ethers.ZeroAddress
-    ) ||
-    (
-      typeof setupData === "string" &&
-      setupData !== "0x"
-    );
-
-  const setupCandidates = [];
-
-  if (explicitSetup) {
-    setupCandidates.push({
-      setupTo:
-        setupTo
-          ? normalizeAddress(setupTo)
-          : ethers.ZeroAddress,
-
-      setupData:
-        typeof setupData === "string" &&
-        ethers.isHexString(setupData)
-          ? setupData
-          : "0x",
-
-      source: "user-supplied",
+  const {
+    payload,
+    target,
+  } =
+    await requestCounterfactualSafeRecovery({
+      targetAddress:
+        safeAddress,
+      targetChainId:
+        network.chainId,
+      connectedOwnerAddress,
     });
-  } else {
-    const knownModule =
-      normalizeAddress(
-        SAFE_4337_V030.module,
-      );
-
-    const sourceHas4337 =
-      (worldSafe.modules ?? []).some(
-        (module) =>
-          normalizeAddress(module) ===
-          knownModule,
-      );
-
-    if (sourceHas4337) {
-      setupCandidates.push({
-        setupTo:
-          normalizeAddress(
-            SAFE_4337_V030.moduleSetup,
-          ),
-
-        setupData:
-          SAFE_MODULE_SETUP_INTERFACE
-            .encodeFunctionData(
-              "enableModules",
-              [[knownModule]],
-            ),
-
-        source:
-          "safe4337-v0.3.0",
-      });
-    } else {
-      setupCandidates.push({
-        setupTo: ethers.ZeroAddress,
-        setupData: "0x",
-        source:
-          "no-setup-delegatecall",
-      });
-    }
-  }
-
-  const methods = [
-    "createProxyWithNonce",
-    "createProxyWithNonceL2",
-  ];
-
-  const theoreticalAttempts =
-    (end - start + 1n) *
-    BigInt(
-      fallbackHandlers.length,
-    ) *
-    BigInt(
-      setupCandidates.length,
-    ) *
-    BigInt(methods.length) *
-    BigInt(
-      SAFE_FACTORY_CANDIDATES.length,
-    );
-
-  const MAX_ATTEMPTS = 50_000n;
 
   if (
-    theoreticalAttempts >
-    MAX_ATTEMPTS
+    payload.sourceSafeState
+      ?.detected !== true
   ) {
     throw new Error(
-      `La busqueda produciria ${theoreticalAttempts.toString()} intentos. Reduce el rango; maximo automatico ${MAX_ATTEMPTS.toString()}.`,
+      "La direccion no fue verificada como Safe en World Chain.",
     );
   }
 
-  let attempts = 0;
-
-  for (
-    const candidate of
-    SAFE_FACTORY_CANDIDATES
+  if (
+    payload.sourceCreation
+      ?.receiptVerified !== true
   ) {
-    const factory =
-      normalizeAddress(
-        candidate.factory,
-      );
-
-    const factoryCode =
-      await timeout(
-        worldProvider.getCode(factory),
-        7_000,
-        "World Safe factory",
-      );
-
-    if (
-      !factoryCode ||
-      factoryCode === "0x"
-    ) {
-      continue;
-    }
-
-    const factoryContract =
-      new ethers.Contract(
-        factory,
-        SAFE_PROXY_FACTORY_ABI,
-        worldProvider,
-      );
-
-    const proxyCreationCode =
-      await timeout(
-        factoryContract.proxyCreationCode(),
-        7_000,
-        "Safe proxyCreationCode",
-      );
-
-    for (
-      const setupCandidate of
-      setupCandidates
-    ) {
-      for (
-        const fallbackHandler of
-        fallbackHandlers
-      ) {
-        const initializer =
-          buildSafeSetupInitializer({
-            owners:
-              worldSafe.owners,
-
-            threshold:
-              worldSafe.threshold,
-
-            fallbackHandler,
-
-            setupTo:
-              setupCandidate.setupTo,
-
-            setupData:
-              setupCandidate.setupData,
-          });
-
-        decodeAndValidateSafeSetupInitializer({
-          initializer,
-          worldSafe,
-          currentFallbackHandler,
-        });
-
-        for (const method of methods) {
-          for (
-            let saltNonce = start;
-            saltNonce <= end;
-            saltNonce += 1n
-          ) {
-            attempts += 1;
-
-            const salt =
-              saltNonce.toString();
-
-            const predictedSourceAddress =
-              computeSafeProxyAddress({
-                factory,
-                proxyCreationCode,
-                singleton,
-                initializer,
-                saltNonce: salt,
-                callback: null,
-                method,
-                chainId:
-                  WORLD_CHAIN_ID,
-              });
-
-            if (
-              !safeSameAddressForCore(
-                predictedSourceAddress,
-                safeAddress,
-              )
-            ) {
-              continue;
-            }
-
-            const validated =
-              await validateManualSafeMirrorDeployment({
-                network,
-
-                targetAddress:
-                  safeAddress,
-
-                manualDeployment: {
-                  method,
-                  factory,
-                  singleton,
-                  initializer,
-                  saltNonce: salt,
-                  callback: null,
-
-                  factoryVersion:
-                    candidate.version,
-
-                  sourceChainId:
-                    WORLD_CHAIN_ID,
-
-                  sourceTransactionHash:
-                    null,
-
-                  sourceUrl:
-                    "safe-forge-source-create2-proof",
-
-                  predictedSourceAddress,
-                },
-              });
-
-            return {
-              ...validated,
-
-              forge: {
-                mode:
-                  "source-create2-verified-heuristic",
-
-                heuristic: true,
-                attempts,
-
-                theoreticalAttempts:
-                  theoreticalAttempts.toString(),
-
-                setupSource:
-                  setupCandidate.source,
-
-                fallbackHandler,
-              },
-            };
-          }
-        }
-      }
-    }
+    throw new Error(
+      "Todavia no existe prueba on-chain completa de la transaccion que creo la Safe World. No se adivinara initializer ni salt.",
+    );
   }
 
+  const sourceDeployment =
+    target.sourceDeployment;
+
+  if (!sourceDeployment) {
+    throw new Error(
+      "El motor encontro la Safe, pero no pudo reconstruir factory, singleton, initializer y salt originales.",
+    );
+  }
+
+  if (
+    sourceDeployment
+      .receiptVerified !== true
+  ) {
+    throw new Error(
+      "La reconstruccion no tiene receipt de creacion verificado.",
+    );
+  }
+
+  const validated =
+    await validateManualSafeMirrorDeployment({
+      network,
+      targetAddress:
+        safeAddress,
+      ownerSignerAddress:
+        connectedOwnerAddress,
+      manualDeployment: {
+        ...sourceDeployment,
+        receiptVerified:
+          true,
+        sourceTransactionHash:
+          sourceDeployment
+            .sourceTransactionHash ??
+          payload.sourceCreation
+            ?.transactionHash ??
+          null,
+        sourceUrl:
+          sourceDeployment
+            .sourceUrl ??
+          payload.sourceCreation
+            ?.sourceUrl ??
+          "counterfactual-safe-recovery-api",
+      },
+    });
+
   return {
-    deployment: null,
+    ...validated,
 
-    attempts,
+    sourceCreation:
+      payload.sourceCreation,
 
-    theoreticalAttempts:
-      theoreticalAttempts.toString(),
+    recoveryAnalysis:
+      target.analysis ??
+      null,
 
-    singleton,
-    fallbackHandlers,
-    setupCandidates,
+    movementPlan:
+      target.movementPlan ??
+      null,
 
-    owners:
-      worldSafe.owners,
+    evidence:
+      target.evidence ??
+      null,
 
-    threshold:
-      worldSafe.threshold,
-
-    reason:
-      "No se encontro un deployment que reproduzca exactamente la Safe fuente. No se preparara ningun movimiento.",
+    forge: {
+      mode:
+        "verified-recovery-api",
+      heuristic:
+        false,
+      attempts:
+        0,
+      bruteForceDisabled:
+        true,
+      receiptVerified:
+        true,
+    },
   };
 }
-
 
 async function findSafeDeploymentFromServices(owner, worldProvider) {
   const creation = await readSafeCreationFromService(WORLD_CHAIN_ID, owner);
@@ -1929,101 +1996,240 @@ async function findSafeDeploymentFromServices(owner, worldProvider) {
   });
 
   return {
-    deployment,
-    errors: deployment ? [] : ["La creacion Safe no predice la direccion origen"],
+    deployment,    errors: deployment ? [] : ["La creacion Safe no predice la direccion origen"],
   };
 }
 
 async function findSafeDeploymentOnWorldChain(owner) {
-  const normalizedOwner = normalizeAddress(owner);
-  const cacheKey = normalizedOwner.toLowerCase();
-  if (safeDeploymentCache.has(cacheKey)) {
-    return safeDeploymentCache.get(cacheKey);
+  const normalizedOwner =
+    normalizeAddress(owner);
+
+  const cacheKey =
+    normalizedOwner.toLowerCase();
+
+  if (
+    safeDeploymentCache.has(
+      cacheKey,
+    )
+  ) {
+    return safeDeploymentCache.get(
+      cacheKey,
+    );
   }
 
-  const promise = (async () => {
-    const worldNetwork = NETWORKS.find(
-      (item) => item.chainId === WORLD_CHAIN_ID,
-    );
-    if (!worldNetwork) return null;
-
-    const worldProvider = await getProvider(worldNetwork);
-    try {
-      const serviceResult = await findSafeDeploymentFromServices(
-        normalizedOwner,
-        worldProvider,
-      );
-      if (serviceResult.deployment) {
-        return serviceResult.deployment;
-      }
-    } catch (error) {
-      console.warn("[SAFE CREATION SERVICE]", error);
-    }
-
-    for (const candidate of SAFE_FACTORY_CANDIDATES) {
-      const factory = normalizeAddress(candidate.factory);
-      const factoryCode = await timeout(
-        worldProvider.getCode(factory),
-        7_000,
-        "Safe factory code",
-      );
-      if (!factoryCode || factoryCode === "0x") continue;
-
-      const logs = await getSafeProxyCreationLogs(
-        worldProvider,
-        factory,
-        normalizedOwner,
-      );
-      for (const log of logs) {
-        const transaction = await timeout(
-          worldProvider.getTransaction(log.transactionHash),
-          7_000,
-          "Safe creation transaction",
+  const promise =
+    (async () => {
+      const worldNetwork =
+        NETWORKS.find(
+          (item) =>
+            item.chainId ===
+            WORLD_CHAIN_ID,
         );
-        const parsed = parseSafeFactoryTransaction(transaction);
-        if (!parsed) continue;
 
-        const predictedSourceAddress = await predictSafeProxyAddress({
-          provider: worldProvider,
-          factory,
-          singleton: parsed.singleton,
-          initializer: parsed.initializer,
-          saltNonce: parsed.saltNonce,
-          callback: parsed.callback,
-          method: parsed.method,
-          chainId: WORLD_CHAIN_ID,
-        });
-        if (!safeSameAddressForCore(predictedSourceAddress, normalizedOwner)) {
+      if (!worldNetwork) {
+        return null;
+      }
+
+      const worldProvider =
+        await getProvider(
+          worldNetwork,
+        );
+
+      try {
+        const serviceResult =
+          await findSafeDeploymentFromServices(
+            normalizedOwner,
+            worldProvider,
+          );
+
+        if (
+          serviceResult.deployment
+            ?.receiptVerified ===
+          true
+        ) {
+          return serviceResult.deployment;
+        }
+      } catch (error) {
+        console.warn(
+          "[SAFE CREATION SERVICE]",
+          error,
+        );
+      }
+
+      /*
+       * Local fallback supports direct SafeProxyFactory creation only.
+       * ERC-4337/wrapper creation is handled by the hardened recovery API.
+       */
+      for (
+        const candidate
+        of SAFE_FACTORY_CANDIDATES
+      ) {
+        const factory =
+          normalizeAddress(
+            candidate.factory,
+          );
+
+        const factoryCode =
+          await timeout(
+            worldProvider.getCode(
+              factory,
+            ),
+            7_000,
+            "Safe factory code",
+          );
+
+        if (
+          !factoryCode ||
+          factoryCode === "0x"
+        ) {
           continue;
         }
 
-        return {
-          ...parsed,
-          factory,
-          factoryVersion: candidate.version,
-          sourceChainId: WORLD_CHAIN_ID,
-          sourceTransactionHash: log.transactionHash,
-          predictedSourceAddress,
-          canReplayCrossChain: !isChainSpecificSafeCreationMethod(parsed.method),
-        };
+        const logs =
+          await getSafeProxyCreationLogs(
+            worldProvider,
+            factory,
+            normalizedOwner,
+          );
+
+        for (
+          const log
+          of logs
+        ) {
+          const [
+            transaction,
+            receipt,
+          ] =
+            await Promise.all([
+              timeout(
+                worldProvider.getTransaction(
+                  log.transactionHash,
+                ),
+                7_000,
+                "Safe creation transaction",
+              ),
+              timeout(
+                worldProvider.getTransactionReceipt(
+                  log.transactionHash,
+                ),
+                7_000,
+                "Safe creation receipt",
+              ),
+            ]);
+
+          if (
+            !receipt ||
+            Number(receipt.status) !== 1 ||
+            !transaction?.to ||
+            !safeSameAddressForCore(
+              transaction.to,
+              factory,
+            )
+          ) {
+            continue;
+          }
+
+          const parsed =
+            parseSafeFactoryTransaction(
+              transaction,
+            );
+
+          if (!parsed) {
+            continue;
+          }
+
+          const receiptVerified =
+            receipt.logs?.some(
+              (receiptLog) =>
+                safeSameAddressForCore(
+                  receiptLog.address,
+                  factory,
+                ) &&
+                safeProxyCreationLogMatches(
+                  receiptLog,
+                  normalizedOwner,
+                  parsed.singleton,
+                ),
+            ) === true;
+
+          if (!receiptVerified) {
+            continue;
+          }
+
+          const predictedSourceAddress =
+            await predictSafeProxyAddress({
+              provider:
+                worldProvider,
+              factory,
+              singleton:
+                parsed.singleton,
+              initializer:
+                parsed.initializer,
+              saltNonce:
+                parsed.saltNonce,
+              callback:
+                parsed.callback,
+              method:
+                parsed.method,
+              chainId:
+                WORLD_CHAIN_ID,
+            });
+
+          if (
+            !safeSameAddressForCore(
+              predictedSourceAddress,
+              normalizedOwner,
+            )
+          ) {
+            continue;
+          }
+
+          return {
+            ...parsed,
+            factory,
+            factoryVersion:
+              candidate.version,
+            sourceChainId:
+              WORLD_CHAIN_ID,
+            sourceTransactionHash:
+              log.transactionHash,
+            sourceUrl:
+              "world-chain-direct-safe-proxy-factory",
+            predictedSourceAddress,
+            receiptVerified:
+              true,
+            canReplayCrossChain:
+              !isChainSpecificSafeCreationMethod(
+                parsed.method,
+              ),
+          };
+        }
       }
-    }
 
-    return null;
-  })();
+      return null;
+    })();
 
-  safeDeploymentCache.set(cacheKey, promise);
+  safeDeploymentCache.set(
+    cacheKey,
+    promise,
+  );
 
   try {
-    const deployment = await promise;
+    const deployment =
+      await promise;
 
     if (!deployment) {
-      safeDeploymentCache.delete(cacheKey);
+      safeDeploymentCache.delete(
+        cacheKey,
+      );
     }
 
     return deployment;
   } catch (error) {
-    safeDeploymentCache.delete(cacheKey);
+    safeDeploymentCache.delete(
+      cacheKey,
+    );
+
     throw error;
   }
 }
@@ -2789,8 +2995,7 @@ function createSafeTypedData({
   gasToken,
   refundReceiver,
   nonce,
-}) {
-  return {
+}) {  return {
     domain: {
       chainId,
       verifyingContract: safeAddress,
@@ -2997,6 +3202,7 @@ async function readSafeProposalResponse(response) {
   if (!text) return null;
   try {
     return JSON.parse(text);
+  } catch {
   } catch {
     return text;
   }
@@ -3788,8 +3994,7 @@ async function sendWithSafeOwnerSigner({
       detected: true,
       owners,
       threshold: Number(threshold),
-    },
-  };
+    },  };
 
   if (!safeOwnersInclude(liveAccountState, signerAddress)) {
     throw new Error(
@@ -4007,18 +4212,47 @@ async function sendWithSafeOwnerSignatureAndExecutor({
   };
 }
 
-function getSafeFactoryDeploymentCall(factory, deployment) {
-  const method = deployment.method ?? "createProxyWithNonce";
-  const saltNonce = BigInt(deployment.saltNonce);
+function getSafeFactoryDeploymentCall(
+  factory,
+  deployment,
+) {
+  const method =
+    deployment.method ??
+    deployment.deploymentMethod ??
+    "createProxyWithNonce";
 
-  if (isChainSpecificSafeCreationMethod(method)) {
+  if (
+    !SAFE_SUPPORTED_CREATION_METHODS.has(
+      method,
+    )
+  ) {
+    throw new Error(
+      `Metodo Safe no soportado por SafeProxyFactory v1.4.1: ${method}`,
+    );
+  }
+
+  const saltNonce =
+    BigInt(
+      deployment.saltNonce,
+    );
+
+  if (
+    isChainSpecificSafeCreationMethod(
+      method,
+    )
+  ) {
     throw new Error(
       "La Safe original usa un metodo dependiente de chainId. No se puede reproducir la misma direccion en otra red.",
     );
   }
 
-  if (method === "createProxyWithCallback") {
-    if (!deployment.callback) {
+  if (
+    method ===
+    "createProxyWithCallback"
+  ) {
+    if (
+      !deployment.callback
+    ) {
       throw new Error(
         "La Safe original usa callback, pero falta la direccion callback verificable.",
       );
@@ -4026,58 +4260,62 @@ function getSafeFactoryDeploymentCall(factory, deployment) {
 
     return {
       method,
-      estimateGas: () =>
-        factory.createProxyWithCallback.estimateGas(
-          deployment.singleton,
-          deployment.initializer,
-          saltNonce,
-          deployment.callback,
-        ),
-      send: (overrides) =>
-        factory.createProxyWithCallback(
-          deployment.singleton,
-          deployment.initializer,
-          saltNonce,
-          deployment.callback,
-          overrides,
-        ),
+
+      estimateGas:
+        () =>
+          factory
+            .createProxyWithCallback
+            .estimateGas(
+              deployment.singleton,
+              deployment.initializer,
+              saltNonce,
+              deployment.callback,
+            ),
+
+      send:
+        (overrides) =>
+          factory
+            .createProxyWithCallback(
+              deployment.singleton,
+              deployment.initializer,
+              saltNonce,
+              deployment.callback,
+              overrides,
+            ),
     };
   }
 
-  if (method === "createProxyWithNonceL2") {
-    return {
-      method,
-      estimateGas: () =>
-        factory.createProxyWithNonceL2.estimateGas(
-          deployment.singleton,
-          deployment.initializer,
-          saltNonce,
-        ),
-      send: (overrides) =>
-        factory.createProxyWithNonceL2(
-          deployment.singleton,
-          deployment.initializer,
-          saltNonce,
-          overrides,
-        ),
-    };
+  if (
+    method !==
+    "createProxyWithNonce"
+  ) {
+    throw new Error(
+      `El metodo ${method} no esta permitido para replay cross-chain.`,
+    );
   }
 
   return {
-    method: "createProxyWithNonce",
-    estimateGas: () =>
-      factory.createProxyWithNonce.estimateGas(
-        deployment.singleton,
-        deployment.initializer,
-        saltNonce,
-      ),
-    send: (overrides) =>
-      factory.createProxyWithNonce(
-        deployment.singleton,
-        deployment.initializer,
-        saltNonce,
-        overrides,
-      ),
+    method,
+
+    estimateGas:
+      () =>
+        factory
+          .createProxyWithNonce
+          .estimateGas(
+            deployment.singleton,
+            deployment.initializer,
+            saltNonce,
+          ),
+
+    send:
+      (overrides) =>
+        factory
+          .createProxyWithNonce(
+            deployment.singleton,
+            deployment.initializer,
+            saltNonce,
+            overrides,
+          ),
   };
 }
 
@@ -4183,6 +4421,54 @@ async function deployCounterfactualSafeMirror({
       );
     }
 
+    const [targetSingleton, targetFallback] = await Promise.all([
+      readSafeProxySingleton(provider, safeAddress),
+      readSafeFallbackHandler(provider, safeAddress),
+    ]);
+
+    if (
+      deployment.singleton &&
+      !safeSameAddressForCore(
+        targetSingleton,
+        deployment.singleton,
+      )
+    ) {
+      throw new Error(
+        "La Safe destino usa un singleton distinto del deployment verificado.",
+      );
+    }
+
+    const expectedFallback =
+      deployment.initializerAnalysis?.fallbackHandler ??
+      null;
+
+    if (
+      expectedFallback &&
+      !safeSameAddressForCore(
+        targetFallback,
+        expectedFallback,
+      )
+    ) {
+      throw new Error(
+        "La Safe destino usa un fallbackHandler distinto del deployment verificado.",
+      );
+    }
+
+    const expectedModules =
+      deployment.initializerAnalysis?.moduleSetup?.modules ??
+      [];
+
+    if (expectedModules.length && safe.modulesReadable) {
+      const liveModules = normalizedAddressSet(safe.modules ?? []);
+      for (const module of expectedModules) {
+        if (!liveModules.includes(normalizeAddress(module).toLowerCase())) {
+          throw new Error(
+            `La Safe destino no tiene habilitado el modulo esperado: ${module}`,
+          );
+        }
+      }
+    }
+
     return {
       deployedNow: false,
 
@@ -4196,6 +4482,18 @@ async function deployCounterfactualSafeMirror({
       hashes: [],
       receipts: [],
     };
+  }
+
+  /*
+   * A counterfactual deployment MUST have verified source provenance.
+   * Manual/heuristic parameters are diagnostic only.
+   */
+  if (
+    deployment.receiptVerified !== true
+  ) {
+    throw new Error(
+      "Falta receipt on-chain verificado de la creacion original de la Safe. Se bloquea el deployment.",
+    );
   }
 
   /*
@@ -4315,6 +4613,26 @@ async function deployCounterfactualSafeMirror({
   ) {
     throw new Error(
       "El deployment Safe fallo",
+    );
+  }
+
+  const deploymentEventVerified =
+    receipt.logs?.some(
+      (log) =>
+        safeSameAddressForCore(
+          log.address,
+          verified.factory,
+        ) &&
+        safeProxyCreationLogMatches(
+          log,
+          safeAddress,
+          verified.singleton,
+        ),
+    ) === true;
+
+  if (!deploymentEventVerified) {
+    throw new Error(
+      "El receipt no contiene ProxyCreation verificable para la Safe esperada.",
     );
   }
 
@@ -4467,6 +4785,9 @@ async function deployCounterfactualSafeMirror({
 
       targetPredictionMatches:
         verified.targetPredictionMatches,
+
+      deploymentEventVerified:
+        true,
 
       nativeBalance:
         nativeBalance.toString(),
@@ -4672,8 +4993,7 @@ export async function sendWithPrivateKeyOwnerAndGasPayer({
       asset: safeAsset,
       transfer,
       route: "safe-mirror-deploy-private-key-gas-payer",
-    });
-  }
+    });  }
 
   throw new Error(
     signerMismatchMessage({
