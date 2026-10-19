@@ -997,7 +997,8 @@ function decodeAndValidateSafeSetupInitializer({
   }
 
   if (!parsed || parsed.name !== "setup") {
-    throw new Error(      "El initializer no corresponde a Safe.setup().",
+    throw new Error(
+      "El initializer no corresponde a Safe.setup().",
     );
   }
 
@@ -1996,7 +1997,8 @@ async function findSafeDeploymentFromServices(owner, worldProvider) {
   });
 
   return {
-    deployment,    errors: deployment ? [] : ["La creacion Safe no predice la direccion origen"],
+    deployment,
+    errors: deployment ? [] : ["La creacion Safe no predice la direccion origen"],
   };
 }
 
@@ -2995,7 +2997,8 @@ function createSafeTypedData({
   gasToken,
   refundReceiver,
   nonce,
-}) {  return {
+}) {
+  return {
     domain: {
       chainId,
       verifyingContract: safeAddress,
@@ -3994,7 +3997,8 @@ async function sendWithSafeOwnerSigner({
       detected: true,
       owners,
       threshold: Number(threshold),
-    },  };
+    },
+  };
 
   if (!safeOwnersInclude(liveAccountState, signerAddress)) {
     throw new Error(
@@ -4993,7 +4997,8 @@ export async function sendWithPrivateKeyOwnerAndGasPayer({
       asset: safeAsset,
       transfer,
       route: "safe-mirror-deploy-private-key-gas-payer",
-    });  }
+    });
+  }
 
   throw new Error(
     signerMismatchMessage({
