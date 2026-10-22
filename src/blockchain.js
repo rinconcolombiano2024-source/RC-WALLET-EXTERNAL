@@ -4312,6 +4312,17 @@ function getSafeFactoryDeploymentCall(
               deployment.callback,
             ),
 
+      staticCall:
+        () =>
+          factory
+            .createProxyWithCallback
+            .staticCall(
+              deployment.singleton,
+              deployment.initializer,
+              saltNonce,
+              deployment.callback,
+            ),
+
       send:
         (overrides) =>
           factory
@@ -4342,6 +4353,16 @@ function getSafeFactoryDeploymentCall(
         factory
           .createProxyWithNonce
           .estimateGas(
+            deployment.singleton,
+            deployment.initializer,
+            saltNonce,
+          ),
+
+    staticCall:
+      () =>
+        factory
+          .createProxyWithNonce
+          .staticCall(
             deployment.singleton,
             deployment.initializer,
             saltNonce,
@@ -4597,6 +4618,22 @@ async function deployCounterfactualSafeMirror({
       verified,
     );
 
+  // Simulate full factory call on the current chain state before broadcasting.
+  // This is a read-only eth_call (NOT a fork simulation) and must return the
+  // exact user-owned Safe address before any transaction can be submitted.
+  const simulatedProxy = normalizeAddress(
+    await timeout(
+      deploymentCall.staticCall(),
+      12_000,
+      `Safe deployment simulation ${deploymentCall.method}`,
+    ),
+  );
+  if (simulatedProxy !== safeAddress) {
+    throw new Error(
+      "La simulacion de SafeProxyFactory devolvio una direccion distinta. No se transmitira el despliegue.",
+    );
+  }
+
   const gasEstimate =
     await timeout(
       deploymentCall.estimateGas(),
@@ -4828,6 +4865,9 @@ async function deployCounterfactualSafeMirror({
 
       deploymentEventVerified:
         true,
+
+      simulatedProxy,
+      factoryStaticCallVerified: true,
 
       nativeBalance:
         nativeBalance.toString(),
