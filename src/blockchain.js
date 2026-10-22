@@ -3237,7 +3237,6 @@ async function readSafeProposalResponse(response) {
   try {
     return JSON.parse(text);
   } catch {
-  } catch {
     return text;
   }
 }
