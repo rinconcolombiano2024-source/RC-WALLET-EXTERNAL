@@ -2498,6 +2498,25 @@ async function readToken(provider, network, owner, definition) {
   };
 }
 
+// Bound parallel RPC reads: token indexers can return dozens of contracts.
+async function settleTokenReads(definitions, reader, concurrency = 6) {
+  const results = new Array(definitions.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, definitions.length) }, async () => {
+      while (cursor < definitions.length) {
+        const index = cursor++;
+        try {
+          results[index] = { status: "fulfilled", value: await reader(definitions[index]) };
+        } catch (reason) {
+          results[index] = { status: "rejected", reason };
+        }
+      }
+    }),
+  );
+  return results;
+}
+
 async function scanNetwork(network, owner, customTokens) {
   const provider = await getProvider(network);
   const [accountCode, nativeBalance] = await Promise.all([
@@ -2562,10 +2581,9 @@ async function scanNetwork(network, owner, customTokens) {
     return true;
   });
 
-  const results = await Promise.allSettled(
-    definitions.map((definition) =>
-      readToken(provider, network, owner, definition),
-    ),
+  const results = await settleTokenReads(
+    definitions,
+    (definition) => readToken(provider, network, owner, definition),
   );
 
   for (const result of results) {
