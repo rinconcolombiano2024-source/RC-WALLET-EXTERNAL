@@ -9,6 +9,7 @@
  * No private key, signature, or transaction is sent to explorers.
  */
 export const BLOCKSCOUT_INDEXERS = Object.freeze({
+  480: "https://worldchain-mainnet.explorer.alchemy.com",
   1: "https://eth.blockscout.com",
   10: "https://optimism.blockscout.com",
   8453: "https://base.blockscout.com",
