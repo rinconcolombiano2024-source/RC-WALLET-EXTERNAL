@@ -2586,6 +2586,7 @@ async function scanNetwork(network, owner, customTokens) {
     (definition) => readToken(provider, network, owner, definition),
   );
 
+  const rejectedTokenReads = results.filter((result) => result.status === "rejected").length;
   for (const result of results) {
     if (result.status === "fulfilled" && result.value) {
       assets.push({ ...result.value, accountKind, accountState });
@@ -2599,7 +2600,12 @@ async function scanNetwork(network, owner, customTokens) {
     accountKind,
     accountState,
     assets,
-    tokenDiscovery: { status: discovery.status, reason: discovery.reason },
+    tokenDiscovery: {
+      status: rejectedTokenReads > 0 ? "partial" : discovery.status,
+      reason: rejectedTokenReads > 0
+        ? `${rejectedTokenReads} contrato(s) no pudieron verificarse via RPC; escaneo incompleto.`
+        : discovery.reason,
+    },
   };
 }
 
