@@ -1773,9 +1773,7 @@ export function analyzeCounterfactualSafeRecovery(
         )
       : null;
 
-  const sourceSafeDetected =
-    sourceSafeState
-      ?.detected === true;
+  const sourceSafeDetected = sourceSafeState?.detected === true;
 
   const normalizedOwners =
     Array.isArray(
@@ -1891,8 +1889,7 @@ export function analyzeCounterfactualSafeRecovery(
     );
 
     if (
-      sourceThreshold !==
-      1n
+      sourceThreshold !== 1n
     ) {
       pushUnique(
         blockers,
@@ -2290,8 +2287,7 @@ export function analyzeCounterfactualSafeRecovery(
       RECOVERY_STATES
         .SOURCE_THRESHOLD_UNVERIFIED;
   } else if (
-    sourceThreshold !==
-      1n
+    sourceThreshold !== 1n
   ) {
     state =
       RECOVERY_STATES
