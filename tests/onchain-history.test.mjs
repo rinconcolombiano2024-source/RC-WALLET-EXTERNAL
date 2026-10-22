@@ -16,10 +16,10 @@ const chainTx = {
   status: "ok",
 };
 const erc20Transfer = {
-  tx_hash: tokenHash,
+  transaction_hash: tokenHash,
   from: { hash: another }, to: { hash: owner },
   total: { value: "12500000" },
-  token: { type: "ERC-20", address_hash: tokenContract, decimals: "6", symbol: "USDC" },
+  token: { type: "ERC-20", address: tokenContract, decimals: "6", symbol: "USDC" },
   timestamp: "2026-10-22T02:31:00Z",
 };
 const unrelated = {
@@ -48,6 +48,7 @@ assert.equal(result.records.length, 2);
 assert.equal(result.records[0].direction, "in");
 assert.equal(result.records[0].symbol, "USDC");
 assert.equal(result.records[0].amount, "12.5");
+assert.equal(result.records[0].contract, tokenContract);
 assert.equal(result.records[1].direction, "out");
 assert.equal(result.records[1].amount, "1.5");
 assert.ok(!JSON.stringify(result).includes("privateKey"));
