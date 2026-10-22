@@ -58,7 +58,7 @@ assert.equal(
   `${BLOCKSCOUT_INDEXERS[137]}/api/v2/addresses/${owner}/token-balances`,
 );
 assert.equal(
-  (await discoverIndexedErc20Tokens({ chainId: 56 }, owner)).status,
+  (await discoverIndexedErc20Tokens({ chainId: 4801 }, owner)).status,
   "unsupported",
 );
 assert.equal(
