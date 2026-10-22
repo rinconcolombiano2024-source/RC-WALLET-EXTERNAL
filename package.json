@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test:wallet": "node tests/wallet-core.test.mjs && node tests/recovery-routes.test.mjs && node tests/counterfactual-safe-engine.test.mjs && node tests/counterfactual-safe-recovery-api.test.mjs && node tests/token-discovery.test.mjs && node tests/bridge-quote.test.mjs && node tests/bnb-token-discovery.test.mjs",
+    "test:wallet": "node tests/wallet-core.test.mjs && node tests/recovery-routes.test.mjs && node tests/counterfactual-safe-engine.test.mjs && node tests/counterfactual-safe-recovery-api.test.mjs && node tests/token-discovery.test.mjs && node tests/bridge-quote.test.mjs && node tests/bnb-token-discovery.test.mjs && node tests/bridge-authorization.test.mjs",
     "lint": "node tests/lint-recovery-security.test.mjs",
     "typecheck": "node tests/typecheck-imports.test.mjs",
     "preview": "vite preview"
