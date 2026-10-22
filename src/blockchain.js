@@ -15,6 +15,7 @@ import {
   TOKENS,
   WORLD_CHAIN_ID,
 } from "./config.js";
+import { discoverIndexedErc20Tokens } from "./token-discovery.js";
 
 const providerCache = new Map();
 const ERC1271_MAGIC_VALUE = "0x1626ba7e";
@@ -2541,7 +2542,8 @@ async function scanNetwork(network, owner, customTokens) {
     });
   }
 
-  const definitions = [
+  const discovery = await discoverIndexedErc20Tokens(network, owner);
+  const definitionsWithDuplicates = [
     ...TOKENS.filter((token) => token.addresses?.[network.chainId]),
     ...customTokens
       .filter((token) => token.chainId === network.chainId)
@@ -2550,7 +2552,15 @@ async function scanNetwork(network, owner, customTokens) {
         customToken: true,
         addresses: { [network.chainId]: token.address },
       })),
+    ...discovery.definitions,
   ];
+  const uniqueAddresses = new Set();
+  const definitions = definitionsWithDuplicates.filter((definition) => {
+    const address = definition.addresses?.[network.chainId]?.toLowerCase();
+    if (!address || uniqueAddresses.has(address)) return false;
+    uniqueAddresses.add(address);
+    return true;
+  });
 
   const results = await Promise.allSettled(
     definitions.map((definition) =>
@@ -2571,6 +2581,7 @@ async function scanNetwork(network, owner, customTokens) {
     accountKind,
     accountState,
     assets,
+    tokenDiscovery: { status: discovery.status, reason: discovery.reason },
   };
 }
 
@@ -2591,6 +2602,8 @@ export async function scanAllNetworks(ownerAddress, customTokens = []) {
         status: "online",
         accountKind: result.value.accountKind,
         accountState: result.value.accountState,
+        discoveryStatus: result.value.tokenDiscovery.status,
+        discoveryReason: result.value.tokenDiscovery.reason,
       };
     } else {
       networks[network.chainId] = {
