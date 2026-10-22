@@ -51,7 +51,7 @@ function directionFor(from, to, owner) {
 }
 
 function toRecord(item, chainId, owner, nativeSymbol, type, position) {
-  const hash = item?.tx_hash ?? item?.hash;
+  const hash = item?.tx_hash ?? item?.transaction_hash ?? item?.hash;
   if (typeof hash !== "string" || !HASH_RE.test(hash)) return null;
   const from = addressOf(item?.from);
   const to = addressOf(item?.to);
@@ -59,7 +59,10 @@ function toRecord(item, chainId, owner, nativeSymbol, type, position) {
   if (!direction) return null;
   const isToken = type === "token";
   const token = item?.token;
-  if (isToken && (token?.type !== "ERC-20" || !ADDRESS_RE.test(token?.address_hash ?? ""))) {
+  // Blockscout v2 token metadata has used both token.address and
+  // token.address_hash across versions. Validate either before linking.
+  const tokenAddress = token?.address_hash ?? token?.address;
+  if (isToken && (token?.type !== "ERC-20" || !ADDRESS_RE.test(tokenAddress ?? ""))) {
     return null;
   }
   const atomicValue = isToken
@@ -77,14 +80,14 @@ function toRecord(item, chainId, owner, nativeSymbol, type, position) {
   const status = String(item?.status || "").toLowerCase();
   const transferId = [
     chainId, type, hash.toLowerCase(),
-    isToken ? token.address_hash.toLowerCase() : "native",
+    isToken ? tokenAddress.toLowerCase() : "native",
     String(item?.log_index ?? item?.index ?? position),
   ].join(":");
   return {
     id: transferId, chainId, hash,
     direction, type, symbol, amount, from, to,
     timestamp, status: status === "error" ? "failed" : status === "pending" ? "pending" : "observed",
-    contract: isToken ? token.address_hash : null,
+    contract: isToken ? tokenAddress : null,
   };
 }
 
