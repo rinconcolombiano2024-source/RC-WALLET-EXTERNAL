@@ -399,6 +399,32 @@ export const NETWORKS = Object.freeze([
   },
 
   {
+    name: "Polygon",
+    chainId: 137,
+    chainHex: "0x89",
+    symbol: "POL",
+    rpcUrls: [
+      "https://polygon-bor-rpc.publicnode.com",
+      "https://polygon.drpc.org",
+    ],
+    explorer: "https://polygonscan.com",
+    writableWithMiniKit: false,
+  },
+
+  {
+    name: "Arbitrum One",
+    chainId: 42161,
+    chainHex: "0xa4b1",
+    symbol: "ETH",
+    rpcUrls: [
+      "https://arb1.arbitrum.io/rpc",
+      "https://arbitrum-one-rpc.publicnode.com",
+    ],
+    explorer: "https://arbiscan.io",
+    writableWithMiniKit: false,
+  },
+
+  {
     name: "World Chain Sepolia",
     chainId: 4801,
     chainHex: "0x12c1",
