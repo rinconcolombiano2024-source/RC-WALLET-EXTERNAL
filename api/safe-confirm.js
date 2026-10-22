@@ -9,6 +9,8 @@ const SAFE_SERVICE_URLS = Object.freeze({
     "https://safe-transaction-world-chain.safe.global",
   ],
   8453: ["https://safe-transaction-base.safe.global"],
+  137: ["https://safe-transaction-polygon.safe.global"],
+  42161: ["https://safe-transaction-arbitrum.safe.global"],
 });
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
@@ -454,6 +456,10 @@ async function postConfirmation({ baseUrl, safeTxHash, signature }) {
   };
 }
 
+function requestBodyTooLarge(body) {
+  return approximateBodyBytes(body) > MAX_BODY_BYTES;
+}
+
 export default async function handler(request, response) {
   if (!requestOriginAllowed(request)) {
     applySecurityHeaders(response);
@@ -475,7 +481,7 @@ export default async function handler(request, response) {
     });
   }
 
-  if (approximateBodyBytes(request.body) > MAX_BODY_BYTES) {
+  if (requestBodyTooLarge(request.body)) {
     return json(request, response, 413, {
       error: "Solicitud demasiado grande",
     });

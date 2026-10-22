@@ -1180,8 +1180,7 @@ export function buildSafeDeploymentTransaction({
     description:
       "Safe deployment transaction. Requires exact source and target CREATE2 proof, fork simulation and explicit human approval before mainnet.",
 
-    mainnetBroadcastPrepared:
-      false,
+    mainnetBroadcastPrepared: false,
   };
 }
 
@@ -1774,9 +1773,7 @@ export function analyzeCounterfactualSafeRecovery(
         )
       : null;
 
-  const sourceSafeDetected =
-    sourceSafeState
-      ?.detected === true;
+  const sourceSafeDetected = sourceSafeState?.detected === true;
 
   const normalizedOwners =
     Array.isArray(
@@ -1892,8 +1889,7 @@ export function analyzeCounterfactualSafeRecovery(
     );
 
     if (
-      sourceThreshold !==
-      1n
+      sourceThreshold !== 1n
     ) {
       pushUnique(
         blockers,
@@ -2291,8 +2287,7 @@ export function analyzeCounterfactualSafeRecovery(
       RECOVERY_STATES
         .SOURCE_THRESHOLD_UNVERIFIED;
   } else if (
-    sourceThreshold !==
-      1n
+    sourceThreshold !== 1n
   ) {
     state =
       RECOVERY_STATES
@@ -2533,20 +2528,15 @@ export function analyzeCounterfactualSafeRecovery(
 
       safeActions,
 
-      manualApprovalRequired:
-        true,
+      manualApprovalRequired: true,
 
-      forkSimulationRequired:
-        true,
+      forkSimulationRequired: true,
 
-      mainnetBroadcastPrepared:
-        false,
+      mainnetBroadcastPrepared: false,
 
-      sourceCreate2ProofRequired:
-        true,
+      sourceCreate2ProofRequired: true,
 
-      targetCreate2ProofRequired:
-        true,
+      targetCreate2ProofRequired: true,
 
       canonicalFactoryMethodsOnly:
         true,

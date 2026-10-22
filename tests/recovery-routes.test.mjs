@@ -396,6 +396,16 @@ requireRegex(
   "Direct recovery must fail closed when source Safe threshold is not 1",
 );
 
+requireAll(
+  blockchainSource,
+  [
+    "deploymentCall.staticCall()",
+    "simulatedProxy !== safeAddress",
+    "factoryStaticCallVerified: true",
+  ],
+  "Safe deployment eth_call preflight",
+);
+
 /* -------------------------------------------------------------------------- */
 /* 10. Deployment/platform configuration                                       */
 /* -------------------------------------------------------------------------- */

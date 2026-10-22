@@ -60,6 +60,8 @@ import {
   getTradeUrl,
   loadMarket,
 } from "./market.js";
+import { assessBridgeAuthorization } from "./bridge-authorization.js";
+import { fetchIndexedHistory } from "./onchain-history.js";
 
 const ERC20_INTERFACE = new ethers.Interface(ERC20_ABI);
 const PERMIT2_INTERFACE = new ethers.Interface([
@@ -443,22 +445,15 @@ function createBridgePlan({
   const worldSessionReady = Boolean(
     authenticated && safeSameAddress(authenticatedWorldAddress, targetAddress),
   );
-  const signerReady =
-    externalMatches || (sourceIsWorldChain ? worldSessionReady : false);
-  const signerRequirement = externalMatches
-    ? "Wallet externa o llave local que controle exactamente la direccion origen"
-    : sourceIsWorldChain
-      ? "Firma World App / MiniKit en World Chain"
-      : "Wallet externa que controle exactamente la misma direccion origen";
-  const signerStatus = externalMatches
-    ? "Wallet externa o llave local coincidente conectada"
-    : sourceIsWorldChain
-      ? worldSessionReady
-        ? "Sesion World App coincide con la direccion origen"
-        : "Falta sesion World App o una firma externa con la direccion origen"
-      : connectedExternalAddress
-        ? "Wallet externa conectada, pero no coincide con la direccion origen"
-        : "Falta conectar wallet externa firmante";
+  const bridgeAuthority = assessBridgeAuthorization({
+    holder: targetAddress,
+    connectedSigner: connectedExternalAddress,
+    accountState: asset.accountState,
+    worldSessionReady,
+  });
+  const signerReady = bridgeAuthority.status === "ready";
+  const signerRequirement = bridgeAuthority.requirement;
+  const signerStatus = bridgeAuthority.detail;
 
   return {
     format: "rc-wallet-assisted-bridge-plan",
@@ -482,7 +477,7 @@ function createBridgePlan({
       requirement: signerRequirement,
       status: signerStatus,
       connectedExternalAddress: connectedExternalAddress || null,
-      externalSignerMatches: externalMatches,
+      externalSignerMatches: signerReady,
     },
     gas: {
       requiredOn: asset.networkName,
@@ -1482,7 +1477,7 @@ function RescueMissionPanel({
       title: "Escaneo EVM real",
       status: hasAssets ? "ready" : scanning ? "pending" : "pending",
       detail: scanning
-        ? "Leyendo Ethereum, Base, Optimism, BNB y World Chain."
+        ? "Leyendo World Chain, Ethereum, Base, Optimism, BNB, Polygon y Arbitrum."
         : hasAssets
           ? `${assets.length} activo(s) detectado(s).`
           : "Escanea redes para encontrar tokens y tipo de cuenta.",
@@ -2005,6 +2000,8 @@ export default function App() {
   const qrVideoRef = useRef(null);
   const qrStreamRef = useRef(null);
   const qrScanActiveRef = useRef(false);
+  const bridgeQuoteSequenceRef = useRef(0);
+  const onchainHistorySequenceRef = useRef(0);
 
   const [activeTab, setActiveTab] = useState("home");
   const [miniKitReady, setMiniKitReady] = useState(false);
@@ -2030,6 +2027,11 @@ export default function App() {
   const [selectedAssetId, setSelectedAssetId] = useState("");
   const [bridgeDestinationChainId, setBridgeDestinationChainId] =
     useState(WORLD_CHAIN_ID);
+  const [bridgeAmount, setBridgeAmount] = useState("");
+  const [bridgeToToken, setBridgeToToken] = useState("USDC");
+  const [bridgeQuote, setBridgeQuote] = useState(null);
+  const [bridgeQuoteError, setBridgeQuoteError] = useState("");
+  const [bridgeQuoting, setBridgeQuoting] = useState(false);
   const [tokenScreenOpen, setTokenScreenOpen] = useState(false);
   const [customTokens, setCustomTokens] = useState(readCustomTokens);
   const [customChainId, setCustomChainId] = useState(1);
@@ -2048,6 +2050,9 @@ export default function App() {
   const [lastTransaction, setLastTransaction] = useState(null);
   const [transferHistory, setTransferHistory] = useState(readTransferHistory);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [historyChainId, setHistoryChainId] = useState(WORLD_CHAIN_ID);
+  const [onchainHistory, setOnchainHistory] = useState(null);
+  const [onchainHistoryBusy, setOnchainHistoryBusy] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [installPromptAvailable, setInstallPromptAvailable] = useState(false);
   const [appInstalled, setAppInstalled] = useState(isStandaloneApp);
@@ -2766,6 +2771,34 @@ export default function App() {
     }
   }, [transferHistory]);
 
+  // A stale response from a previous wallet address or selected blockchain
+  // must never be displayed as on-chain activity for the new selection.
+  useEffect(() => {
+    onchainHistorySequenceRef.current += 1;
+    setOnchainHistory(null);
+    setOnchainHistoryBusy(false);
+  }, [targetAddress, historyChainId]);
+
+  const refreshOnchainHistory = useCallback(async () => {
+    const id = ++onchainHistorySequenceRef.current;
+    setOnchainHistory(null);
+    if (!targetAddress) {
+      setOnchainHistory({ status: "unavailable", records: [], reason: "Selecciona primero una direccion publica" });
+      return;
+    }
+    const network = NETWORKS.find((value) => value.chainId === Number(historyChainId));
+    if (!network) return;
+    setOnchainHistoryBusy(true);
+    const result = await fetchIndexedHistory({
+      chainId: network.chainId, address: targetAddress,
+      nativeSymbol: network.symbol,
+    });
+    if (onchainHistorySequenceRef.current === id) {
+      setOnchainHistory(result);
+      setOnchainHistoryBusy(false);
+    }
+  }, [historyChainId, targetAddress]);
+
   useEffect(() => {
     setRecipient("");
     setAmount("");
@@ -2959,13 +2992,21 @@ export default function App() {
         (asset) => asset.chainId !== WORLD_CHAIN_ID,
       ).length;
 
+      const incompleteNetworks = Object.values(result.networks).filter(
+        (item) =>
+          item.status === "offline" ||
+          item.discoveryStatus !== "indexed",
+      );
+      const scanSummary = result.assets.length
+        ? externalAssetCount
+          ? `Escaneo completado: ${externalAssetCount} activo(s) externos encontrados. La disponibilidad para moverlos depende del control criptografico.`
+          : `Escaneo completado: ${result.assets.length} activo(s) en World Chain; sin otros saldos verificados.`
+        : "No se encontraron balances entre los contratos consultados.";
       showStatus(
-        result.assets.length
-          ? externalAssetCount
-            ? `Escaneo completado: ${externalAssetCount} activo(s) fuera de World Chain listos para revisar.`
-            : `Escaneo completado: ${result.assets.length} activo(s) en World Chain. No se detectaron fondos externos configurados.`
-          : "No se encontraron balances entre los activos configurados.",
-        "success",
+        incompleteNetworks.length
+          ? `${scanSummary} Atención: ${incompleteNetworks.length} red(es) sin descubrimiento ERC-20 completo; resultado parcial. Puedes agregar contratos manualmente.`
+          : scanSummary,
+        incompleteNetworks.length ? "warning" : "success",
       );
     } catch (error) {
       console.error("[SCAN]", error);
@@ -4256,6 +4297,76 @@ export default function App() {
     targetAddress,
   ]);
 
+  // Quoting never signs or broadcasts. A route quote does not establish
+  // ownership or that the selected account can execute a bridge transaction.
+  useEffect(() => {
+    bridgeQuoteSequenceRef.current += 1;
+    setBridgeQuote(null);
+    setBridgeQuoteError("");
+    setBridgeQuoting(false);
+  }, [bridgeAmount, bridgeToToken, bridgeDestinationChainId, selectedAsset?.id, targetAddress]);
+
+  const requestBridgeQuote = useCallback(async () => {
+    const requestSequence = ++bridgeQuoteSequenceRef.current;
+    setBridgeQuote(null);
+    setBridgeQuoteError("");
+    if (!selectedAsset || !bridgeDestinationNetwork || !targetAddress) {
+      setBridgeQuoteError("Selecciona una direccion, un token y una red destino.");
+      return;
+    }
+
+    const cleanAmount = normalizeAmount(bridgeAmount);
+    if (!isValidAmount(cleanAmount)) {
+      setBridgeQuoteError("Introduce una cantidad positiva para cotizar.");
+      return;
+    }
+    let fromAmount;
+    try {
+      const amountUnits = ethers.parseUnits(cleanAmount, selectedAsset.decimals);
+      if (amountUnits <= 0n || amountUnits > selectedAsset.rawBalance) {
+        throw new Error("La cantidad debe ser positiva y no superar el saldo verificado");
+      }
+      fromAmount = amountUnits.toString();
+    } catch (error) {
+      setBridgeQuoteError(error.message || "Cantidad invalida");
+      return;
+    }
+
+    setBridgeQuoting(true);
+    try {
+      const response = await fetch("/api/bridge-quote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromChain: selectedAsset.chainId,
+          toChain: bridgeDestinationNetwork.chainId,
+          fromToken: selectedAsset.isNative ? selectedAsset.symbol : selectedAsset.address,
+          toToken: bridgeToToken,
+          fromAmount,
+          fromAddress: targetAddress,
+          toAddress: targetAddress,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok || !body?.ok || !body?.quote) {
+        throw new Error(body?.error || "No se encontro una cotizacion verificada");
+      }
+      if (mountedRef.current && bridgeQuoteSequenceRef.current === requestSequence) {
+        setBridgeQuote(body.quote);
+        showStatus("Cotizacion externa recibida. No se han firmado ni enviado transacciones.", "success");
+      }
+    } catch (error) {
+      if (mountedRef.current && bridgeQuoteSequenceRef.current === requestSequence) {
+        setBridgeQuoteError(error?.message || "Error consultando el proveedor");
+        showStatus("La cotizacion del puente no esta disponible. No se movieron fondos.", "warning");
+      }
+    } finally {
+      if (mountedRef.current && bridgeQuoteSequenceRef.current === requestSequence) {
+        setBridgeQuoting(false);
+      }
+    }
+  }, [bridgeAmount, bridgeDestinationNetwork, bridgeToToken, selectedAsset, showStatus, targetAddress]);
+
   const openBridgeProvider = useCallback(
     (provider) => {
       if (!selectedAsset || !bridgeDestinationNetwork || !selectedBridgePlan) {
@@ -4925,8 +5036,72 @@ export default function App() {
               aria-modal="true"
               aria-labelledby="transfer-history-title"
             >
-              <span className="eyebrow">Historial local</span>
-              <h2 id="transfer-history-title">Transferencias</h2>
+              <span className="eyebrow">Historial de operaciones</span>
+              <h2 id="transfer-history-title">Historial local y actividad pública</h2>
+
+              <div className="builder-box">
+                <strong>Actividad real registrada en la blockchain</strong>
+                <p>Consulta las últimas transferencias del explorador. El historial local de operaciones RC Wallet aparece debajo. La lectura es pública y nunca mueve fondos.</p>
+                <label className="label" htmlFor="onchain-history-chain">
+                  Red
+                  <select
+                    id="onchain-history-chain"
+                    className="input"
+                    value={historyChainId}
+                    onChange={(event) => setHistoryChainId(Number(event.target.value))}
+                  >
+                    {NETWORKS.filter((network) => !network.testnet).map((network) => (
+                      <option key={network.chainId} value={network.chainId}>{network.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  disabled={onchainHistoryBusy || !targetAddress}
+                  onClick={refreshOnchainHistory}
+                >
+                  {onchainHistoryBusy ? "Consultando blockchain..." : "Consultar actividad on-chain"}
+                </button>
+                {onchainHistory && (
+                  <>
+                    <p role="status">
+                      {onchainHistory.status === "indexed"
+                        ? "Última actividad indexada. No incluye necesariamente todas las operaciones históricas."
+                        : onchainHistory.reason || "El índice de actividad no está disponible"}
+                    </p>
+                    {onchainHistory.records.length ? (
+                      <div className="history-list">
+                        {onchainHistory.records.map((item) => {
+                          const network = NETWORKS.find((value) => value.chainId === item.chainId);
+                          return (
+                            <article className="history-item" key={item.id}>
+                              <strong>{item.direction === "in" ? "Recibido" : item.direction === "out" ? "Enviado" : "Propio"}: {item.amount} {item.symbol}</strong>
+                              <small>
+                                {item.type === "token" ? "ERC-20" : "Transacción nativa"} · {new Date(item.timestamp).toLocaleString()}
+                              </small>
+                              <small>
+                                De {compactAddress(item.from)} a {compactAddress(item.to)} · {item.status}
+                              </small>
+                              {network && (
+                                <a href={explorerTransactionUrl(network, item.hash)} target="_blank" rel="noreferrer">
+                                  Ver transacción en explorer
+                                </a>
+                              )}
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="empty">
+                        {onchainHistory.status === "indexed" ? "El explorador no encontró actividad reciente." : "No se pudo confirmar actividad; no significa ausencia de fondos."}
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <h3>Operaciones guardadas en este dispositivo</h3>
               {transferHistory.length ? (
                 <div className="history-list">
                   {transferHistory.map((item, index) => (
@@ -6553,6 +6728,72 @@ export default function App() {
                   Conectar wallet firmante para bridge
                 </button>
               )}
+
+              <div className="builder-box">
+                <strong>Cotizar un puente real (LI.FI, solo consulta)</strong>
+                <p>
+                  La consulta muestra una estimacion del proveedor; no inicia ni
+                  autoriza una transaccion. No existen transferencias automáticas.
+                </p>
+                <label className="label" htmlFor="bridge-amount">
+                  Cantidad de {selectedAsset.symbol} en origen
+                  <input
+                    id="bridge-amount"
+                    className="input"
+                    inputMode="decimal"
+                    value={bridgeAmount}
+                    onChange={(event) => setBridgeAmount(event.target.value)}
+                    placeholder="0.0"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="label" htmlFor="bridge-out-token">
+                  Token que deseas recibir en {bridgeDestinationNetwork?.name}
+                  <select
+                    id="bridge-out-token"
+                    className="input"
+                    value={bridgeToToken}
+                    onChange={(event) => setBridgeToToken(event.target.value)}
+                  >
+                    {["USDC", "USDT", "ETH", "WLD", "BNB", "POL"].map((symbol) => (
+                      <option key={symbol} value={symbol}>{symbol}</option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={requestBridgeQuote}
+                  disabled={bridgeQuoting}
+                >
+                  {bridgeQuoting ? "Consultando puente..." : "Consultar cotizacion real"}
+                </button>
+                {bridgeQuoteError && <p role="alert" className="bridge-warning">{bridgeQuoteError}</p>}
+                {bridgeQuote && (
+                  <div className="bridge-readiness bridge-readiness--needs-action" role="status">
+                    <strong>Estimacion: {bridgeQuote.provider}</strong>
+                    <p>
+                      Minimo previsto: {ethers.formatUnits(
+                        bridgeQuote.minimumOutputAtomic, bridgeQuote.outputDecimals
+                      )} {bridgeQuote.outputSymbol}
+                    </p>
+                    <p>
+                      Salida estimada: {ethers.formatUnits(
+                        bridgeQuote.estimatedOutputAtomic, bridgeQuote.outputDecimals
+                      )} {bridgeQuote.outputSymbol}
+                    </p>
+                    <small>
+                      Gas USD aprox.: {bridgeQuote.gasCostUSD ?? "no disponible"};
+                      comisiones USD aprox.: {bridgeQuote.feeCostUSD ?? "no disponible"}.
+                    </small>
+                    <p>
+                      Esta cotizacion no demuestra que la cuenta Safe pueda
+                      firmar el puente. Para ejecutar, abre el proveedor y revisa
+                      los contratos, tokens, redes y permisos en tu wallet.
+                    </p>
+                  </div>
+                )}
+              </div>
 
               <div className="bridge-provider-grid">
                 {WORLD_CHAIN_BRIDGES.map((provider) => (

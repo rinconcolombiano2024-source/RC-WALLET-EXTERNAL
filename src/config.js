@@ -193,6 +193,14 @@ export const SAFE_CREATION_SERVICE_URLS = Object.freeze({
   8453: [
     "https://safe-transaction-base.safe.global",
   ],
+
+  137: [
+    "https://safe-transaction-polygon.safe.global",
+  ],
+
+  42161: [
+    "https://safe-transaction-arbitrum.safe.global",
+  ],
 });
 
 export const SAFE_CLIENT_GATEWAY_URL =
@@ -395,6 +403,32 @@ export const NETWORKS = Object.freeze([
     explorer:
       "https://bscscan.com",
 
+    writableWithMiniKit: false,
+  },
+
+  {
+    name: "Polygon",
+    chainId: 137,
+    chainHex: "0x89",
+    symbol: "POL",
+    rpcUrls: [
+      "https://polygon-bor-rpc.publicnode.com",
+      "https://polygon.drpc.org",
+    ],
+    explorer: "https://polygonscan.com",
+    writableWithMiniKit: false,
+  },
+
+  {
+    name: "Arbitrum One",
+    chainId: 42161,
+    chainHex: "0xa4b1",
+    symbol: "ETH",
+    rpcUrls: [
+      "https://arb1.arbitrum.io/rpc",
+      "https://arbitrum-one-rpc.publicnode.com",
+    ],
+    explorer: "https://arbiscan.io",
     writableWithMiniKit: false,
   },
 

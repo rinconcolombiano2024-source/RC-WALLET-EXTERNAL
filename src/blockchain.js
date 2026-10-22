@@ -15,6 +15,7 @@ import {
   TOKENS,
   WORLD_CHAIN_ID,
 } from "./config.js";
+import { discoverIndexedErc20Tokens } from "./token-discovery.js";
 
 const providerCache = new Map();
 const ERC1271_MAGIC_VALUE = "0x1626ba7e";
@@ -2497,6 +2498,25 @@ async function readToken(provider, network, owner, definition) {
   };
 }
 
+// Bound parallel RPC reads: token indexers can return dozens of contracts.
+async function settleTokenReads(definitions, reader, concurrency = 6) {
+  const results = new Array(definitions.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, definitions.length) }, async () => {
+      while (cursor < definitions.length) {
+        const index = cursor++;
+        try {
+          results[index] = { status: "fulfilled", value: await reader(definitions[index]) };
+        } catch (reason) {
+          results[index] = { status: "rejected", reason };
+        }
+      }
+    }),
+  );
+  return results;
+}
+
 async function scanNetwork(network, owner, customTokens) {
   const provider = await getProvider(network);
   const [accountCode, nativeBalance] = await Promise.all([
@@ -2541,7 +2561,8 @@ async function scanNetwork(network, owner, customTokens) {
     });
   }
 
-  const definitions = [
+  const discovery = await discoverIndexedErc20Tokens(network, owner);
+  const definitionsWithDuplicates = [
     ...TOKENS.filter((token) => token.addresses?.[network.chainId]),
     ...customTokens
       .filter((token) => token.chainId === network.chainId)
@@ -2550,14 +2571,22 @@ async function scanNetwork(network, owner, customTokens) {
         customToken: true,
         addresses: { [network.chainId]: token.address },
       })),
+    ...discovery.definitions,
   ];
+  const uniqueAddresses = new Set();
+  const definitions = definitionsWithDuplicates.filter((definition) => {
+    const address = definition.addresses?.[network.chainId]?.toLowerCase();
+    if (!address || uniqueAddresses.has(address)) return false;
+    uniqueAddresses.add(address);
+    return true;
+  });
 
-  const results = await Promise.allSettled(
-    definitions.map((definition) =>
-      readToken(provider, network, owner, definition),
-    ),
+  const results = await settleTokenReads(
+    definitions,
+    (definition) => readToken(provider, network, owner, definition),
   );
 
+  const rejectedTokenReads = results.filter((result) => result.status === "rejected").length;
   for (const result of results) {
     if (result.status === "fulfilled" && result.value) {
       assets.push({ ...result.value, accountKind, accountState });
@@ -2571,6 +2600,12 @@ async function scanNetwork(network, owner, customTokens) {
     accountKind,
     accountState,
     assets,
+    tokenDiscovery: {
+      status: rejectedTokenReads > 0 ? "partial" : discovery.status,
+      reason: rejectedTokenReads > 0
+        ? `${rejectedTokenReads} contrato(s) no pudieron verificarse via RPC; escaneo incompleto.`
+        : discovery.reason,
+    },
   };
 }
 
@@ -2591,6 +2626,8 @@ export async function scanAllNetworks(ownerAddress, customTokens = []) {
         status: "online",
         accountKind: result.value.accountKind,
         accountState: result.value.accountState,
+        discoveryStatus: result.value.tokenDiscovery.status,
+        discoveryReason: result.value.tokenDiscovery.reason,
       };
     } else {
       networks[network.chainId] = {
@@ -3205,7 +3242,6 @@ async function readSafeProposalResponse(response) {
   if (!text) return null;
   try {
     return JSON.parse(text);
-  } catch {
   } catch {
     return text;
   }
@@ -4276,6 +4312,17 @@ function getSafeFactoryDeploymentCall(
               deployment.callback,
             ),
 
+      staticCall:
+        () =>
+          factory
+            .createProxyWithCallback
+            .staticCall(
+              deployment.singleton,
+              deployment.initializer,
+              saltNonce,
+              deployment.callback,
+            ),
+
       send:
         (overrides) =>
           factory
@@ -4306,6 +4353,16 @@ function getSafeFactoryDeploymentCall(
         factory
           .createProxyWithNonce
           .estimateGas(
+            deployment.singleton,
+            deployment.initializer,
+            saltNonce,
+          ),
+
+    staticCall:
+      () =>
+        factory
+          .createProxyWithNonce
+          .staticCall(
             deployment.singleton,
             deployment.initializer,
             saltNonce,
@@ -4561,6 +4618,22 @@ async function deployCounterfactualSafeMirror({
       verified,
     );
 
+  // Simulate full factory call on the current chain state before broadcasting.
+  // This is a read-only eth_call (NOT a fork simulation) and must return the
+  // exact user-owned Safe address before any transaction can be submitted.
+  const simulatedProxy = normalizeAddress(
+    await timeout(
+      deploymentCall.staticCall(),
+      12_000,
+      `Safe deployment simulation ${deploymentCall.method}`,
+    ),
+  );
+  if (simulatedProxy !== safeAddress) {
+    throw new Error(
+      "La simulacion de SafeProxyFactory devolvio una direccion distinta. No se transmitira el despliegue.",
+    );
+  }
+
   const gasEstimate =
     await timeout(
       deploymentCall.estimateGas(),
@@ -4792,6 +4865,9 @@ async function deployCounterfactualSafeMirror({
 
       deploymentEventVerified:
         true,
+
+      simulatedProxy,
+      factoryStaticCallVerified: true,
 
       nativeBalance:
         nativeBalance.toString(),
