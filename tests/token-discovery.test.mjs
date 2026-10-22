@@ -4,13 +4,15 @@ import {
   parseIndexedErc20Definitions,
   discoverIndexedErc20Tokens,
 } from "../src/token-discovery.js";
-import { NETWORKS } from "../src/config.js";
+import { NETWORKS, SAFE_CREATION_SERVICE_URLS } from "../src/config.js";
 
 const owner = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 const validToken = "0x163f8C2467924be0ae7B5347228CABF260318753";
 const anotherToken = "0x0000000000000000000000000000000000000002";
 
 assert.equal(NETWORKS.find((n) => n.chainId === 137)?.symbol, "POL");
+assert.match(SAFE_CREATION_SERVICE_URLS[137][0], /safe-transaction-polygon/);
+assert.match(SAFE_CREATION_SERVICE_URLS[42161][0], /safe-transaction-arbitrum/);
 assert.equal(NETWORKS.find((n) => n.chainId === 42161)?.chainHex, "0xa4b1");
 for (const network of NETWORKS) {
   assert.equal(Number.parseInt(network.chainHex, 16), network.chainId);
