@@ -1482,7 +1482,7 @@ function RescueMissionPanel({
       title: "Escaneo EVM real",
       status: hasAssets ? "ready" : scanning ? "pending" : "pending",
       detail: scanning
-        ? "Leyendo Ethereum, Base, Optimism, BNB y World Chain."
+        ? "Leyendo World Chain, Ethereum, Base, Optimism, BNB, Polygon y Arbitrum."
         : hasAssets
           ? `${assets.length} activo(s) detectado(s).`
           : "Escanea redes para encontrar tokens y tipo de cuenta.",
@@ -2959,13 +2959,21 @@ export default function App() {
         (asset) => asset.chainId !== WORLD_CHAIN_ID,
       ).length;
 
+      const incompleteNetworks = Object.values(result.networks).filter(
+        (item) =>
+          item.status === "offline" ||
+          item.discoveryStatus !== "indexed",
+      );
+      const scanSummary = result.assets.length
+        ? externalAssetCount
+          ? `Escaneo completado: ${externalAssetCount} activo(s) externos encontrados. La disponibilidad para moverlos depende del control criptografico.`
+          : `Escaneo completado: ${result.assets.length} activo(s) en World Chain; sin otros saldos verificados.`
+        : "No se encontraron balances entre los contratos consultados.";
       showStatus(
-        result.assets.length
-          ? externalAssetCount
-            ? `Escaneo completado: ${externalAssetCount} activo(s) fuera de World Chain listos para revisar.`
-            : `Escaneo completado: ${result.assets.length} activo(s) en World Chain. No se detectaron fondos externos configurados.`
-          : "No se encontraron balances entre los activos configurados.",
-        "success",
+        incompleteNetworks.length
+          ? `${scanSummary} Atención: ${incompleteNetworks.length} red(es) sin descubrimiento ERC-20 completo; resultado parcial. Puedes agregar contratos manualmente.`
+          : scanSummary,
+        incompleteNetworks.length ? "warning" : "success",
       );
     } catch (error) {
       console.error("[SCAN]", error);
