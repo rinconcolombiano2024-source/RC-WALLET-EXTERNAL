@@ -90,6 +90,11 @@ export function sanitizeBridgeQuote(quote, requested) {
   ) {
     throw new Error("El proveedor devolvio una ruta diferente de la solicitada");
   }
+  // Do not silently swap into a different output ticker than the user's choice.
+  const returnedOutputSymbol = String(action.toToken?.symbol ?? "").toUpperCase();
+  if (returnedOutputSymbol !== request.toToken.toUpperCase()) {
+    throw new Error("El token recibido no coincide con la seleccion del usuario");
+  }
   const fromTokenAddress = String(action.fromToken?.address ?? "");
   const requestedInputIsAddress = ADDRESS_PATTERN.test(request.fromToken);
   if (requestedInputIsAddress && fromTokenAddress.toLowerCase() !== request.fromToken.toLowerCase()) {
