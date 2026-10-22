@@ -25,9 +25,9 @@ Permitir que un usuario que posee una llave privada real pueda:
 ## Cobertura del escaneo ERC-20
 
 - Contratos preconfigurados: lectura RPC en todas las redes definidas.
-- Descubrimiento adicional: Blockscout (Ethereum, Optimism, Base, Polygon y Arbitrum One), cuando la API publica responde.
+- Descubrimiento adicional: Blockscout (World Chain, Ethereum, Optimism, Base, Polygon y Arbitrum One), cuando la API publica responde.
 - Cada contrato sugerido por el indexador se verifica de nuevo en la red mediante bytecode, `balanceOf`, `decimals` y `symbol`; un indexador no autoriza envios.
-- World Chain, BNB Chain y testnet mantienen escaneo de contratos configurados o añadidos manualmente. Una caida del indexador o RPC se marca como **escaneo parcial**, nunca como prueba de saldo cero.
+- BNB Chain y testnet mantienen escaneo de contratos configurados o añadidos manualmente. Una caida del indexador o RPC se marca como **escaneo parcial**, nunca como prueba de saldo cero.
 - Consultar una direccion **no demuestra control**; la recuperacion Safe requiere comprobacion de owner, factory, initializer, salt, CREATE2 y firma autorizada.
 - Este escaneo consulta servicios de terceros usando la direccion publica y puede estar sujeto a limites, fallos de red y respuestas incompletas.
 
@@ -58,6 +58,14 @@ Escanea nativos y ERC20 configurados:
 - Tokens personalizados agregados por contrato.
 
 Nota: el descubrimiento automatico se apoya en un indexador de terceros donde este disponible y **no garantiza exhaustividad**. Esta version no simula balances: permite agregar contratos personalizados y vuelve a leer sus saldos reales on-chain.
+
+## Cotizaciones reales de puentes
+
+- En **Mover → Bridge asistido**, introducir cantidad y token de salida para consultar el proveedor LI.FI mediante `/api/bridge-quote`.
+- El backend valida cadenas, direcciones, token, cantidad, importe mínimo y coherencia de la respuesta. Solo devuelve resumen (mínimo recibido, gas estimado y tarifas); **no devuelve calldata ni firma ni ejecuta una transacción**.
+- **El éxito de una cotización no acredita control de los fondos.** El usuario debe autorizar y ejecutar en una wallet o Safe compatible del proveedor. Antes de transferir, revisar redes, contratos, permisos y destino; el bridge puede no admitir Safe o World App.
+- Para una Safe no desplegada en otra red, RC Wallet realiza un **`eth_call` previo** de la factory, verifica que la dirección simulada coincida exactamente y revisa pruebas CREATE2. Esto **no reemplaza una simulación en fork ni equivale a un rescate mainnet exitoso**.
+- La disponibilidad de rutas, costos, slippage, gas y tiempos de entrega dependen del proveedor y pueden cambiar. **No realizar transferencias principales sin pruebas end-to-end y aprobación humana.**
 
 ## PWA
 
