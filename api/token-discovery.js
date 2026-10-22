@@ -35,7 +35,7 @@ export function parseBinplorerTokenHints(value) {
     total++;
     if (items.length >= MAX_CONTRACTS) continue;
     const symbol = typeof metadata?.symbol === "string"
-      ? metadata.symbol.replace(/[<>/\\u0000-\\u001f]/g, "").trim().slice(0, 30)
+      ? metadata.symbol.replace(/[<>]/g, "").replaceAll("/", "").replace(/[\x00-\x1f]/g, "").trim().slice(0, 30)
       : "";
     items.push({
       token: {
