@@ -61,6 +61,7 @@ import {
   loadMarket,
 } from "./market.js";
 import { assessBridgeAuthorization } from "./bridge-authorization.js";
+import { fetchIndexedHistory } from "./onchain-history.js";
 
 const ERC20_INTERFACE = new ethers.Interface(ERC20_ABI);
 const PERMIT2_INTERFACE = new ethers.Interface([
@@ -2000,6 +2001,7 @@ export default function App() {
   const qrStreamRef = useRef(null);
   const qrScanActiveRef = useRef(false);
   const bridgeQuoteSequenceRef = useRef(0);
+  const onchainHistorySequenceRef = useRef(0);
 
   const [activeTab, setActiveTab] = useState("home");
   const [miniKitReady, setMiniKitReady] = useState(false);
@@ -2048,6 +2050,9 @@ export default function App() {
   const [lastTransaction, setLastTransaction] = useState(null);
   const [transferHistory, setTransferHistory] = useState(readTransferHistory);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [historyChainId, setHistoryChainId] = useState(WORLD_CHAIN_ID);
+  const [onchainHistory, setOnchainHistory] = useState(null);
+  const [onchainHistoryBusy, setOnchainHistoryBusy] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [installPromptAvailable, setInstallPromptAvailable] = useState(false);
   const [appInstalled, setAppInstalled] = useState(isStandaloneApp);
@@ -2765,6 +2770,34 @@ export default function App() {
       console.warn("[LOCAL STORAGE] transfer history", error);
     }
   }, [transferHistory]);
+
+  // A stale response from a previous wallet address or selected blockchain
+  // must never be displayed as on-chain activity for the new selection.
+  useEffect(() => {
+    onchainHistorySequenceRef.current += 1;
+    setOnchainHistory(null);
+    setOnchainHistoryBusy(false);
+  }, [targetAddress, historyChainId]);
+
+  const refreshOnchainHistory = useCallback(async () => {
+    const id = ++onchainHistorySequenceRef.current;
+    setOnchainHistory(null);
+    if (!targetAddress) {
+      setOnchainHistory({ status: "unavailable", records: [], reason: "Selecciona primero una direccion publica" });
+      return;
+    }
+    const network = NETWORKS.find((value) => value.chainId === Number(historyChainId));
+    if (!network) return;
+    setOnchainHistoryBusy(true);
+    const result = await fetchIndexedHistory({
+      chainId: network.chainId, address: targetAddress,
+      nativeSymbol: network.symbol,
+    });
+    if (onchainHistorySequenceRef.current === id) {
+      setOnchainHistory(result);
+      setOnchainHistoryBusy(false);
+    }
+  }, [historyChainId, targetAddress]);
 
   useEffect(() => {
     setRecipient("");
@@ -5003,8 +5036,72 @@ export default function App() {
               aria-modal="true"
               aria-labelledby="transfer-history-title"
             >
-              <span className="eyebrow">Historial local</span>
-              <h2 id="transfer-history-title">Transferencias</h2>
+              <span className="eyebrow">Historial de operaciones</span>
+              <h2 id="transfer-history-title">Historial local y actividad pública</h2>
+
+              <div className="builder-box">
+                <strong>Actividad real registrada en la blockchain</strong>
+                <p>Consulta las últimas transferencias del explorador. El historial local de operaciones RC Wallet aparece debajo. La lectura es pública y nunca mueve fondos.</p>
+                <label className="label" htmlFor="onchain-history-chain">
+                  Red
+                  <select
+                    id="onchain-history-chain"
+                    className="input"
+                    value={historyChainId}
+                    onChange={(event) => setHistoryChainId(Number(event.target.value))}
+                  >
+                    {NETWORKS.filter((network) => !network.testnet).map((network) => (
+                      <option key={network.chainId} value={network.chainId}>{network.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  disabled={onchainHistoryBusy || !targetAddress}
+                  onClick={refreshOnchainHistory}
+                >
+                  {onchainHistoryBusy ? "Consultando blockchain..." : "Consultar actividad on-chain"}
+                </button>
+                {onchainHistory && (
+                  <>
+                    <p role="status">
+                      {onchainHistory.status === "indexed"
+                        ? "Última actividad indexada. No incluye necesariamente todas las operaciones históricas."
+                        : onchainHistory.reason || "El índice de actividad no está disponible"}
+                    </p>
+                    {onchainHistory.records.length ? (
+                      <div className="history-list">
+                        {onchainHistory.records.map((item) => {
+                          const network = NETWORKS.find((value) => value.chainId === item.chainId);
+                          return (
+                            <article className="history-item" key={item.id}>
+                              <strong>{item.direction === "in" ? "Recibido" : item.direction === "out" ? "Enviado" : "Propio"}: {item.amount} {item.symbol}</strong>
+                              <small>
+                                {item.type === "token" ? "ERC-20" : "Transacción nativa"} · {new Date(item.timestamp).toLocaleString()}
+                              </small>
+                              <small>
+                                De {compactAddress(item.from)} a {compactAddress(item.to)} · {item.status}
+                              </small>
+                              {network && (
+                                <a href={explorerTransactionUrl(network, item.hash)} target="_blank" rel="noreferrer">
+                                  Ver transacción en explorer
+                                </a>
+                              )}
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="empty">
+                        {onchainHistory.status === "indexed" ? "El explorador no encontró actividad reciente." : "No se pudo confirmar actividad; no significa ausencia de fondos."}
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <h3>Operaciones guardadas en este dispositivo</h3>
               {transferHistory.length ? (
                 <div className="history-list">
                   {transferHistory.map((item, index) => (
