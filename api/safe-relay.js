@@ -24,6 +24,8 @@ const SAFE_SERVICE_URLS = Object.freeze({
   8453: [
     "https://safe-transaction-base.safe.global",
   ],
+  137: ["https://safe-transaction-polygon.safe.global"],
+  42161: ["https://safe-transaction-arbitrum.safe.global"],
 });
 
 const GELATO_SPONSORED_CALL_URL =
