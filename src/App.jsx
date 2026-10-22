@@ -2005,6 +2005,7 @@ export default function App() {
   const qrVideoRef = useRef(null);
   const qrStreamRef = useRef(null);
   const qrScanActiveRef = useRef(false);
+  const bridgeQuoteSequenceRef = useRef(0);
 
   const [activeTab, setActiveTab] = useState("home");
   const [miniKitReady, setMiniKitReady] = useState(false);
@@ -2030,6 +2031,11 @@ export default function App() {
   const [selectedAssetId, setSelectedAssetId] = useState("");
   const [bridgeDestinationChainId, setBridgeDestinationChainId] =
     useState(WORLD_CHAIN_ID);
+  const [bridgeAmount, setBridgeAmount] = useState("");
+  const [bridgeToToken, setBridgeToToken] = useState("USDC");
+  const [bridgeQuote, setBridgeQuote] = useState(null);
+  const [bridgeQuoteError, setBridgeQuoteError] = useState("");
+  const [bridgeQuoting, setBridgeQuoting] = useState(false);
   const [tokenScreenOpen, setTokenScreenOpen] = useState(false);
   const [customTokens, setCustomTokens] = useState(readCustomTokens);
   const [customChainId, setCustomChainId] = useState(1);
@@ -4263,6 +4269,76 @@ export default function App() {
     showStatus,
     targetAddress,
   ]);
+
+  // Quoting never signs or broadcasts. A route quote does not establish
+  // ownership or that the selected account can execute a bridge transaction.
+  useEffect(() => {
+    bridgeQuoteSequenceRef.current += 1;
+    setBridgeQuote(null);
+    setBridgeQuoteError("");
+    setBridgeQuoting(false);
+  }, [bridgeAmount, bridgeToToken, bridgeDestinationChainId, selectedAsset?.id, targetAddress]);
+
+  const requestBridgeQuote = useCallback(async () => {
+    const requestSequence = ++bridgeQuoteSequenceRef.current;
+    setBridgeQuote(null);
+    setBridgeQuoteError("");
+    if (!selectedAsset || !bridgeDestinationNetwork || !targetAddress) {
+      setBridgeQuoteError("Selecciona una direccion, un token y una red destino.");
+      return;
+    }
+
+    const cleanAmount = normalizeAmount(bridgeAmount);
+    if (!isValidAmount(cleanAmount)) {
+      setBridgeQuoteError("Introduce una cantidad positiva para cotizar.");
+      return;
+    }
+    let fromAmount;
+    try {
+      const amountUnits = ethers.parseUnits(cleanAmount, selectedAsset.decimals);
+      if (amountUnits <= 0n || amountUnits > selectedAsset.rawBalance) {
+        throw new Error("La cantidad debe ser positiva y no superar el saldo verificado");
+      }
+      fromAmount = amountUnits.toString();
+    } catch (error) {
+      setBridgeQuoteError(error.message || "Cantidad invalida");
+      return;
+    }
+
+    setBridgeQuoting(true);
+    try {
+      const response = await fetch("/api/bridge-quote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromChain: selectedAsset.chainId,
+          toChain: bridgeDestinationNetwork.chainId,
+          fromToken: selectedAsset.isNative ? selectedAsset.symbol : selectedAsset.address,
+          toToken: bridgeToToken,
+          fromAmount,
+          fromAddress: targetAddress,
+          toAddress: targetAddress,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok || !body?.ok || !body?.quote) {
+        throw new Error(body?.error || "No se encontro una cotizacion verificada");
+      }
+      if (mountedRef.current && bridgeQuoteSequenceRef.current === requestSequence) {
+        setBridgeQuote(body.quote);
+        showStatus("Cotizacion externa recibida. No se han firmado ni enviado transacciones.", "success");
+      }
+    } catch (error) {
+      if (mountedRef.current && bridgeQuoteSequenceRef.current === requestSequence) {
+        setBridgeQuoteError(error?.message || "Error consultando el proveedor");
+        showStatus("La cotizacion del puente no esta disponible. No se movieron fondos.", "warning");
+      }
+    } finally {
+      if (mountedRef.current && bridgeQuoteSequenceRef.current === requestSequence) {
+        setBridgeQuoting(false);
+      }
+    }
+  }, [bridgeAmount, bridgeDestinationNetwork, bridgeToToken, selectedAsset, showStatus, targetAddress]);
 
   const openBridgeProvider = useCallback(
     (provider) => {
@@ -6561,6 +6637,72 @@ export default function App() {
                   Conectar wallet firmante para bridge
                 </button>
               )}
+
+              <div className="builder-box">
+                <strong>Cotizar un puente real (LI.FI, solo consulta)</strong>
+                <p>
+                  La consulta muestra una estimacion del proveedor; no inicia ni
+                  autoriza una transaccion. No existen transferencias automáticas.
+                </p>
+                <label className="label" htmlFor="bridge-amount">
+                  Cantidad de {selectedAsset.symbol} en origen
+                  <input
+                    id="bridge-amount"
+                    className="input"
+                    inputMode="decimal"
+                    value={bridgeAmount}
+                    onChange={(event) => setBridgeAmount(event.target.value)}
+                    placeholder="0.0"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="label" htmlFor="bridge-out-token">
+                  Token que deseas recibir en {bridgeDestinationNetwork?.name}
+                  <select
+                    id="bridge-out-token"
+                    className="input"
+                    value={bridgeToToken}
+                    onChange={(event) => setBridgeToToken(event.target.value)}
+                  >
+                    {["USDC", "USDT", "ETH", "WLD", "BNB", "POL"].map((symbol) => (
+                      <option key={symbol} value={symbol}>{symbol}</option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={requestBridgeQuote}
+                  disabled={bridgeQuoting}
+                >
+                  {bridgeQuoting ? "Consultando puente..." : "Consultar cotizacion real"}
+                </button>
+                {bridgeQuoteError && <p role="alert" className="bridge-warning">{bridgeQuoteError}</p>}
+                {bridgeQuote && (
+                  <div className="bridge-readiness bridge-readiness--needs-action" role="status">
+                    <strong>Estimacion: {bridgeQuote.provider}</strong>
+                    <p>
+                      Minimo previsto: {ethers.formatUnits(
+                        bridgeQuote.minimumOutputAtomic, bridgeQuote.outputDecimals
+                      )} {bridgeQuote.outputSymbol}
+                    </p>
+                    <p>
+                      Salida estimada: {ethers.formatUnits(
+                        bridgeQuote.estimatedOutputAtomic, bridgeQuote.outputDecimals
+                      )} {bridgeQuote.outputSymbol}
+                    </p>
+                    <small>
+                      Gas USD aprox.: {bridgeQuote.gasCostUSD ?? "no disponible"};
+                      comisiones USD aprox.: {bridgeQuote.feeCostUSD ?? "no disponible"}.
+                    </small>
+                    <p>
+                      Esta cotizacion no demuestra que la cuenta Safe pueda
+                      firmar el puente. Para ejecutar, abre el proveedor y revisa
+                      los contratos, tokens, redes y permisos en tu wallet.
+                    </p>
+                  </div>
+                )}
+              </div>
 
               <div className="bridge-provider-grid">
                 {WORLD_CHAIN_BRIDGES.map((provider) => (
