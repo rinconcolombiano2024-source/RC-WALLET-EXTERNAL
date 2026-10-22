@@ -1180,8 +1180,7 @@ export function buildSafeDeploymentTransaction({
     description:
       "Safe deployment transaction. Requires exact source and target CREATE2 proof, fork simulation and explicit human approval before mainnet.",
 
-    mainnetBroadcastPrepared:
-      false,
+    mainnetBroadcastPrepared: false,
   };
 }
 
@@ -2533,20 +2532,15 @@ export function analyzeCounterfactualSafeRecovery(
 
       safeActions,
 
-      manualApprovalRequired:
-        true,
+      manualApprovalRequired: true,
 
-      forkSimulationRequired:
-        true,
+      forkSimulationRequired: true,
 
-      mainnetBroadcastPrepared:
-        false,
+      mainnetBroadcastPrepared: false,
 
-      sourceCreate2ProofRequired:
-        true,
+      sourceCreate2ProofRequired: true,
 
-      targetCreate2ProofRequired:
-        true,
+      targetCreate2ProofRequired: true,
 
       canonicalFactoryMethodsOnly:
         true,
