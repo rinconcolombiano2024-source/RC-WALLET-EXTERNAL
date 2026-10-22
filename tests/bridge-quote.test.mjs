@@ -51,6 +51,7 @@ assert.equal(safeQuote.feeCostUSD, 0.38);
 assert.equal(safeQuote.executionAvailableInRcWallet, false);
 assert.equal(safeQuote.transactionRequest, undefined);
 assert.throws(() => sanitizeBridgeQuote({ ...quote, action: { ...quote.action, fromAddress: destination } }, payload), /ruta diferente/);
+assert.throws(() => sanitizeBridgeQuote({ ...quote, action: { ...quote.action, toToken: { ...quote.action.toToken, symbol: "USDT" } } }, payload), /token recibido/);
 assert.throws(() => sanitizeBridgeQuote({ ...quote, estimate: { ...quote.estimate, toAmountMin: "999999999" } }, payload), /inconsistente/);
 
 function res() {
