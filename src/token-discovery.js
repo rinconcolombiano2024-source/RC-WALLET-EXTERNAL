@@ -62,8 +62,10 @@ export async function discoverIndexedErc20Tokens(
   address,
   { fetchImpl = globalThis.fetch, timeoutMs = 6_000, maxTokens = DEFAULT_MAX_TOKENS } = {},
 ) {
-  const baseUrl = BLOCKSCOUT_INDEXERS[Number(network?.chainId)];
-  if (!baseUrl) {
+  const chainId = Number(network?.chainId);
+  const baseUrl = BLOCKSCOUT_INDEXERS[chainId];
+  const isBnbChain = chainId === 56;
+  if (!baseUrl && !isBnbChain) {
     return { status: "unsupported", definitions: [], reason: "Sin indexador ERC-20 configurado" };
   }
   if (typeof address !== "string" || !ADDRESS_PATTERN.test(address)) {
@@ -76,18 +78,31 @@ export async function discoverIndexedErc20Tokens(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const url = `${baseUrl}/api/v2/addresses/${address}/token-balances`;
+    const url = isBnbChain
+      ? `/api/token-discovery?chainId=56&address=${encodeURIComponent(address)}`
+      : `${baseUrl}/api/v2/addresses/${address}/token-balances`;
     const response = await fetchImpl(url, {
       method: "GET",
       headers: { Accept: "application/json" },
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`Indexer HTTP ${response.status}`);
-    const parsed = parseIndexedErc20Definitions(await response.json(), network.chainId, maxTokens);
+    const upstream = await response.json();
+    if (isBnbChain && !["partial", "indexed"].includes(upstream?.status)) {
+      throw new Error("Indexer BNB no valido");
+    }
+    const parsed = parseIndexedErc20Definitions(
+      isBnbChain ? upstream.items : upstream, network.chainId, maxTokens
+    );
+    const incomplete = parsed.truncated || (isBnbChain && upstream.status === "partial");
     return {
-      status: parsed.truncated ? "partial" : "indexed",
+      status: incomplete ? "partial" : "indexed",
       definitions: parsed.definitions,
-      reason: parsed.truncated ? "Limite de contratos alcanzado: escaneo parcial" : null,
+      reason: parsed.truncated
+        ? "Limite de contratos alcanzado: escaneo parcial"
+        : incomplete
+          ? "Descubrimiento BNB limitado; cada balance se verifica directamente por RPC"
+          : null,
     };
   } catch (error) {
     return {
