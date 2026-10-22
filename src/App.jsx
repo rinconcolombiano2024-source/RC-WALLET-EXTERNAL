@@ -60,6 +60,7 @@ import {
   getTradeUrl,
   loadMarket,
 } from "./market.js";
+import { assessBridgeAuthorization } from "./bridge-authorization.js";
 
 const ERC20_INTERFACE = new ethers.Interface(ERC20_ABI);
 const PERMIT2_INTERFACE = new ethers.Interface([
@@ -443,22 +444,15 @@ function createBridgePlan({
   const worldSessionReady = Boolean(
     authenticated && safeSameAddress(authenticatedWorldAddress, targetAddress),
   );
-  const signerReady =
-    externalMatches || (sourceIsWorldChain ? worldSessionReady : false);
-  const signerRequirement = externalMatches
-    ? "Wallet externa o llave local que controle exactamente la direccion origen"
-    : sourceIsWorldChain
-      ? "Firma World App / MiniKit en World Chain"
-      : "Wallet externa que controle exactamente la misma direccion origen";
-  const signerStatus = externalMatches
-    ? "Wallet externa o llave local coincidente conectada"
-    : sourceIsWorldChain
-      ? worldSessionReady
-        ? "Sesion World App coincide con la direccion origen"
-        : "Falta sesion World App o una firma externa con la direccion origen"
-      : connectedExternalAddress
-        ? "Wallet externa conectada, pero no coincide con la direccion origen"
-        : "Falta conectar wallet externa firmante";
+  const bridgeAuthority = assessBridgeAuthorization({
+    holder: targetAddress,
+    connectedSigner: connectedExternalAddress,
+    accountState: asset.accountState,
+    worldSessionReady,
+  });
+  const signerReady = bridgeAuthority.status === "ready";
+  const signerRequirement = bridgeAuthority.requirement;
+  const signerStatus = bridgeAuthority.detail;
 
   return {
     format: "rc-wallet-assisted-bridge-plan",
@@ -482,7 +476,7 @@ function createBridgePlan({
       requirement: signerRequirement,
       status: signerStatus,
       connectedExternalAddress: connectedExternalAddress || null,
-      externalSignerMatches: externalMatches,
+      externalSignerMatches: signerReady,
     },
     gas: {
       requiredOn: asset.networkName,
