@@ -9,6 +9,8 @@ const SAFE_SERVICE_URLS = Object.freeze({
     "https://safe-transaction-world-chain.safe.global",
   ],
   8453: ["https://safe-transaction-base.safe.global"],
+  137: ["https://safe-transaction-polygon.safe.global"],
+  42161: ["https://safe-transaction-arbitrum.safe.global"],
 });
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
