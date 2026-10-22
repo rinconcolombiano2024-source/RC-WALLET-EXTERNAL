@@ -454,6 +454,10 @@ async function postConfirmation({ baseUrl, safeTxHash, signature }) {
   };
 }
 
+function requestBodyTooLarge(body) {
+  return approximateBodyBytes(body) > MAX_BODY_BYTES;
+}
+
 export default async function handler(request, response) {
   if (!requestOriginAllowed(request)) {
     applySecurityHeaders(response);
@@ -475,7 +479,7 @@ export default async function handler(request, response) {
     });
   }
 
-  if (approximateBodyBytes(request.body) > MAX_BODY_BYTES) {
+  if (requestBodyTooLarge(request.body)) {
     return json(request, response, 413, {
       error: "Solicitud demasiado grande",
     });
