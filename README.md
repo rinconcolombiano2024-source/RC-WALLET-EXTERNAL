@@ -60,6 +60,14 @@ Escanea nativos y ERC20 configurados:
 
 Nota: el descubrimiento automatico se apoya en un indexador de terceros donde este disponible y **no garantiza exhaustividad**. Esta version no simula balances: permite agregar contratos personalizados y vuelve a leer sus saldos reales on-chain.
 
+## Historial en cadena de la dirección pública
+
+- En **Dirección → Ver historial → Actividad real registrada en la blockchain** se pueden consultar los eventos públicos recientes por red, sin firma y sin introducir ninguna clave.
+- Las redes World Chain, Ethereum, Optimism, Base, Polygon y Arbitrum usan las API públicas de **Blockscout**. Se muestran transacciones externas y transferencias ERC-20 separadas del historial local de operaciones registradas por RC Wallet.
+- BNB Chain todavía no dispone de un historial on-chain indexado en este módulo; la aplicación declara esa limitación en lugar de inventar resultados. El escaneo de balances BNB se mantiene independiente de esta función.
+- Sólo se muestran eventos verificables mediante un hash válido del proveedor. Los proveedores pueden tener datos parciales, estar caídos o devolver registros incompletos, y **las entradas del historial no demuestran autoridad para gastar**.
+- Las consultas son las últimas entradas suministradas por el explorador; no constituyen un extracto contable exhaustivo ni incluyen necesariamente movimientos internos de contratos.
+
 ## Cotizaciones reales de puentes
 
 - En **Mover → Bridge asistido**, introducir cantidad y token de salida para consultar el proveedor LI.FI mediante `/api/bridge-quote`.
